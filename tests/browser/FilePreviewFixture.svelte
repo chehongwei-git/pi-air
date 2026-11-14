@@ -7,7 +7,7 @@
     {
       id: 'files',
       role: 'assistant',
-      text: '已修改 `src/main.ts:2`，下载[报告](docs/报告.pdf)或[图片](assets/图.png)。另见[说明](docs/说明.md)、[失败](docs/missing.txt)、[项目外](../outside.txt)和[长路径](docs/很长的目录名称/另一个很长的目录名称/包含完整说明的长文件名称.md)。',
+      text: '网站 `btdig.com`、`nyaa.si` 和[搜索](example.com/search?q=test)。已修改 `src/main.ts:2`，下载[报告](docs/报告.pdf)或[图片](assets/图.png)。另见[说明](docs/说明.md)、[失败](docs/missing.txt)、[项目外](../outside.txt)和[长路径](docs/很长的目录名称/另一个很长的目录名称/包含完整说明的长文件名称.md)。',
       thinking: '',
       status: 'done',
       name: null,

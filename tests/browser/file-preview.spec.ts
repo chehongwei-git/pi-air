@@ -9,7 +9,11 @@ for (const narrow of [false, true]) {
       (window as any).__TAURI_INTERNALS__ = {
         invoke: async (command: string, args: any) => {
           (window as any).calls.push({ command, args });
-          if (command === 'open_message_file') return;
+          if (
+            command === 'open_message_file' ||
+            command === 'plugin:opener|open_url'
+          )
+            return;
           if (command !== 'preview_file') throw new Error(command);
           if (args.path.includes('missing'))
             throw new Error('文件不存在，请检查路径');
@@ -65,6 +69,33 @@ for (const narrow of [false, true]) {
       await page.evaluate(
         () => (document.documentElement.dataset.theme = 'dark'),
       );
+    for (const [name, url] of [
+      ['btdig.com', 'https://btdig.com/'],
+      ['nyaa.si', 'https://nyaa.si/'],
+      ['搜索', 'https://example.com/search?q=test'],
+    ]) {
+      const link = page.getByRole('link', { name, exact: true });
+      await link.focus();
+      await link.press('Enter');
+      await expect
+        .poll(() => page.evaluate(() => (window as any).calls.at(-1)))
+        .toMatchObject({
+          command: 'plugin:opener|open_url',
+          args: { url },
+        });
+      await expect(page.locator('.file-preview-panel')).toHaveCount(0);
+      await expect(link).toBeFocused();
+    }
+    expect(
+      await page.evaluate(() =>
+        (window as any).calls.some(
+          (call: any) => call.command === 'preview_file',
+        ),
+      ),
+    ).toBe(false);
+    await page.screenshot({
+      path: `test-results/website-links-${narrow ? 'narrow-dark' : 'wide-light'}.png`,
+    });
     const code = page.getByRole('link', { name: 'src/main.ts:2' });
     await code.click();
     await expect(

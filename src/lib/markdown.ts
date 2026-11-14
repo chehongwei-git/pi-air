@@ -1,7 +1,7 @@
 /** 安全 Markdown 渲染端口：拒绝原始 HTML、远程图片与危险协议；缓存限制在 8MiB。 */
 import MarkdownIt from 'markdown-it';
 import DOMPurify from 'dompurify';
-import { codeFileTarget, fileTarget } from './file-links';
+import { codeFileTarget, fileTarget, websiteTarget } from './file-links';
 const parser = new MarkdownIt({ html: false, linkify: false, breaks: true });
 // 不给模型输出发起图片网络请求的机会，避免用户打开历史就泄露网络元数据。
 parser.renderer.rules.image = () =>
@@ -12,7 +12,8 @@ parser.validateLink = (url) => /^file:/i.test(url) || validateLink(url);
 const escape = parser.utils.escapeHtml;
 parser.renderer.rules.link_open = (tokens, index) => {
   const href = tokens[index].attrGet('href') ?? '';
-  if (safeExternal(href)) return `<a href="${escape(href)}">`;
+  const website = safeExternal(href) ? href : websiteTarget(href);
+  if (website) return `<a href="${escape(website)}">`;
   const target = fileTarget(href);
   return target
     ? `<a href="#" data-file-path="${escape(target.path)}"${target.line ? ` data-file-line="${target.line}"` : ''}>`
@@ -29,6 +30,14 @@ parser.renderer.rules.code_inline = (tokens, index) => {
       break;
     }
   }
+  // 裸域名与完整网址沿用外部打开入口，不触发本地文件预览；代码外观保持不变。
+  const website = inLink
+    ? null
+    : safeExternal(value)
+      ? value
+      : websiteTarget(value);
+  if (website)
+    return `<a href="${escape(website)}"><code>${escape(value)}</code></a>`;
   const target = inLink ? null : codeFileTarget(value);
   return target
     ? `<a href="#" data-file-path="${escape(target.path)}"${target.line ? ` data-file-line="${target.line}"` : ''}><code>${escape(value)}</code></a>`
