@@ -121,6 +121,8 @@ export class Workspace {
     if (this.active) {
       session.settings = this.active.settings;
       session.sessions = this.active.sessions;
+      session.models = this.active.models;
+      session.modelsError = this.active.modelsError;
       session.expandedProjects = this.active.expandedProjects;
     }
     session.navigation = {
@@ -135,6 +137,15 @@ export class Workspace {
         await this.ensure(this.active);
       },
       ensure: () => this.ensure(session),
+      refreshModels: async () => {
+        const source = [...this.sessions]
+          .reverse()
+          .find((item) => item.runtimeId && item.connection === 'ready');
+        if (!source) throw new Error('请等待 Pi 连接完成后重试。');
+        await source.refreshMetadata();
+        session.models = source.models;
+        session.modelsError = source.modelsError;
+      },
       stopForArchive: (path) => this.stopForArchive(path),
       archived: (path) => this.finishArchive(path),
       changed: () => {
@@ -271,6 +282,9 @@ export class Workspace {
     session.project = project;
     session.newChatProject = project;
     session.models = previous.models;
+    session.modelsError = previous.modelsError;
+    // 启动目录尚在读取时创建的草稿也接收最终结果，不停留在空数组副本。
+    if (previous.modelsLoading) void session.refreshModels();
     session.levels = previous.levels;
     session.snapshot = { model, thinkingLevel: thinking };
     session.initializeDraftModel(model, thinking);

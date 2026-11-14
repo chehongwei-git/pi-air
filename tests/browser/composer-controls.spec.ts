@@ -10,6 +10,7 @@ test('switches models and thinking beside the input and preserves drafts', async
       { provider: 'test', id: 'a', name: 'Claude Opus' },
       { provider: 'test', id: 'b', name: 'GPT' },
     ];
+    host.catalogReads = 0;
     let model = models[0];
     let thinkingLevel = 'off';
     const callbacks = new Map();
@@ -60,6 +61,8 @@ test('switches models and thinking beside the input and preserves drafts', async
         if (command === 'perform') {
           switch (args.action.type) {
             case 'models':
+              // 首次目录失败不依赖发送恢复；显式重试后返回完整目录。
+              if (++host.catalogReads === 1) throw new Error('目录暂不可用');
               return { models };
             case 'thinking_levels':
               return {
@@ -115,6 +118,18 @@ test('switches models and thinking beside the input and preserves drafts', async
   const input = page.getByRole('textbox', { name: '消息输入' });
   await expect(model).toBeEnabled();
   await expect(thinking).toHaveText(/思考\s*关闭/);
+  await model.click();
+  await expect(composer.getByRole('alert')).toContainText('目录暂不可用');
+  await expect(composer.locator('.model-option')).toHaveCount(1);
+  await composer.getByRole('button', { name: '重试加载模型' }).click();
+  await expect(composer.locator('.model-option')).toHaveCount(2);
+  await expect(composer.getByRole('alert')).toHaveCount(0);
+  await page.screenshot({
+    path: 'test-results/model-catalog-startup.png',
+    animations: 'disabled',
+  });
+  await page.keyboard.press('Escape');
+  await expect(model).toBeFocused();
   await expect(page.locator('.topbar select')).toHaveCount(0);
   // 检查真实交叠位置的命中对象，不直接比较不同堆叠上下文的 z-index。
   async function expectMenusAboveTools() {

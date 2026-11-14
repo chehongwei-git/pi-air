@@ -158,6 +158,9 @@
   <div class="control-row">
     <ModelPicker
       models={desktop.models}
+      loading={desktop.modelsLoading}
+      error={desktop.modelsError}
+      onretry={() => void desktop.refreshModels()}
       current={desktop.selectedModel}
       disabled={unavailable}
       connecting={desktop.connection === 'starting'}

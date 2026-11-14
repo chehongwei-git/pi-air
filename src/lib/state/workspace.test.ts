@@ -168,6 +168,40 @@ function summary(path: string, cwd: string): SessionSummary {
   };
 }
 describe('cross-project workspace', () => {
+  it('shares a late startup catalog with a new local draft without connecting or sending', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const source = workspace.active;
+    source.models = [];
+    // 只延迟只读目录，不改变源会话或创建新运行实例。
+    let finish!: () => void;
+    const refresh = vi
+      .spyOn(source, 'refreshMetadata')
+      .mockImplementation(async () => {
+        source.modelsLoading = true;
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        source.models = [
+          { provider: 'mock', id: 'a', name: 'A' },
+          { provider: 'mock', id: 'b', name: 'B' },
+        ];
+        source.modelsLoading = false;
+      });
+    source.modelsLoading = true;
+    const connect = vi.spyOn(api, 'connect');
+    workspace.newDraft('/other');
+    const draft = workspace.active;
+    draft.draft = '保持输入';
+    await draft.setThinking('high');
+    expect(draft.modelsLoading).toBe(true);
+    finish();
+    await vi.waitFor(() => expect(draft.models).toHaveLength(2));
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(draft.draft).toBe('保持输入');
+    expect(draft.selectedThinking).toBe('high');
+    expect(connect).not.toHaveBeenCalled();
+  });
   it('Skill 草稿、首次提交与索引刷新均使用用户任务，显式名称仍优先', async () => {
     const { workspace } = fixture();
     await workspace.init();

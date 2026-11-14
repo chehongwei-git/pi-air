@@ -72,9 +72,46 @@ function fixture() {
   };
 }
 describe('Pi desktop bridge', () => {
+  it('waits for the cold-start catalog without selecting a model or changing thinking', async () => {
+    const { ctx, events, setModel, getLevel } = fixture();
+    let release!: () => void;
+    let available = [ctx.model];
+    ctx.modelRegistry.getAvailable = () => available;
+    ctx.modelRegistry.refresh.mockImplementation(async () => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      available = [ctx.model, { provider: 'other', id: 'second' }];
+      return { errors: new Map(), aborted: false };
+    });
+    let completed = false;
+    const starting = Promise.resolve(
+      events.get('session_start')!({}, ctx),
+    ).then(() => {
+      completed = true;
+    });
+    await Promise.resolve();
+    expect(completed).toBe(false);
+    expect(ctx.modelRegistry.getAvailable()).toHaveLength(1);
+    release();
+    await starting;
+    expect(ctx.modelRegistry.getAvailable()).toHaveLength(2);
+    expect(ctx.modelRegistry.refresh).toHaveBeenCalledWith({
+      allowNetwork: false,
+    });
+    expect(setModel).not.toHaveBeenCalled();
+    expect(getLevel()).toBe('off');
+  });
+  it('surfaces cold-start catalog errors instead of treating them as an empty catalog', async () => {
+    const { ctx, events } = fixture();
+    ctx.modelRegistry.getError = () => 'invalid config';
+    await expect(events.get('session_start')!({}, ctx)).rejects.toThrow(
+      'invalid config',
+    );
+  });
   it.each(['session_start', 'model_select', 'before_agent_start'])(
     'uses capability metadata on %s independently of model names',
-    (event) => {
+    async (event) => {
       const { ctx, events } = fixture();
       for (const adaptive of [true, false]) {
         ctx.model = {
@@ -83,7 +120,7 @@ describe('Pi desktop bridge', () => {
           id: 'arbitrary-model',
           compat: { forceAdaptiveThinking: adaptive },
         };
-        events.get(event)!({}, ctx);
+        await events.get(event)!({}, ctx);
         expect(ctx.model.compat?.forceAdaptiveThinking).toBe(adaptive);
         expect(ctx.model.thinkingLevelMap?.xhigh).toBe('high');
       }

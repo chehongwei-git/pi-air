@@ -21,6 +21,38 @@ function fixture() {
 }
 
 describe('composer model controls', () => {
+  it('shows loading and inline retry without hiding the current model or losing the draft', async () => {
+    const { desktop } = fixture();
+    desktop.models = [];
+    desktop.modelsLoading = true;
+    const retry = vi
+      .spyOn(desktop, 'refreshModels')
+      .mockImplementation(async () => {
+        desktop.modelsError = '';
+        desktop.models = [
+          desktop.snapshot.model!,
+          { provider: 'other', id: 'b', name: 'B' },
+        ];
+      });
+    const view = render(ModelControls, { desktop });
+    await fireEvent.click(view.getByRole('button', { name: '模型' }));
+    expect(view.getByRole('status')).toHaveTextContent('正在加载模型');
+    expect(view.getByRole('button', { pressed: true })).toHaveAttribute(
+      'title',
+      'test/a',
+    );
+    desktop.modelsLoading = false;
+    desktop.modelsError = '读取失败';
+    await waitFor(() =>
+      expect(view.getByRole('alert')).toHaveTextContent('读取失败'),
+    );
+    expect(view.queryByText(/请在设置中配置服务商/)).not.toBeInTheDocument();
+    await fireEvent.click(view.getByRole('button', { name: '重试加载模型' }));
+    await waitFor(() => expect(view.getByTitle('other/b')).toBeInTheDocument());
+    expect(retry).toHaveBeenCalledOnce();
+    expect(view.getByRole('textbox', { name: '搜索模型' })).toHaveFocus();
+    expect(desktop.draft).toBe('保留草稿');
+  });
   it('bounds a large catalog and finds models beyond the initial batch', async () => {
     const { desktop } = fixture();
     desktop.models = Array.from({ length: 500 }, (_, index) => ({

@@ -53,6 +53,7 @@ export interface SessionNavigation {
   connect(project: string): Promise<void>;
   ensure(): Promise<void>;
   changed(): void;
+  refreshModels?(): Promise<void>;
   stopForArchive(path: string): Promise<void>;
   archived(path: string): void;
 }
@@ -517,6 +518,13 @@ export class Desktop {
     task: Promise<void>;
   };
   models = $state<Model[]>([]);
+  modelsLoading = $state(false);
+  modelsError = $state('');
+  private metadataTask?: {
+    runtime: string;
+    revision: number;
+    task: Promise<void>;
+  };
   levels = $state<string[]>([]);
   commands = $state<Command[]>([]);
   builtinRequest = $state<{ name: string; args: string } | null>(null);
@@ -1481,10 +1489,47 @@ export class Desktop {
       this.respondingExtensions.delete(request.id);
     }
   }
-  /** 查询模型/命令可失败降级，不影响已建立的文本会话。 */
-  async refreshMetadata(): Promise<void> {
+  /** 本地草稿借用已有连接的只读目录，不为查看模型启动额外进程。 */
+  async refreshModels(): Promise<void> {
+    if (!this.runtimeId && this.navigation?.refreshModels) {
+      this.modelsLoading = true;
+      this.modelsError = '';
+      try {
+        await this.navigation.refreshModels();
+      } catch (error) {
+        this.modelsError = errorMessage(error);
+      } finally {
+        this.modelsLoading = false;
+      }
+      return;
+    }
+    await this.refreshMetadata();
+  }
+  /** 同运行实例及配置版本合并读取；旧响应不能覆盖新的模型目录。 */
+  refreshMetadata(): Promise<void> {
     const runtime = this.runtimeId;
     const revision = this.modelConfigRevision;
+    if (!runtime) return Promise.resolve();
+    if (
+      this.metadataTask?.runtime === runtime &&
+      this.metadataTask.revision === revision
+    )
+      return this.metadataTask.task;
+    this.modelsLoading = true;
+    const task = this.fetchMetadata(runtime, revision).finally(() => {
+      if (this.metadataTask?.task === task) {
+        this.modelsLoading = false;
+        this.metadataTask = undefined;
+      }
+    });
+    this.metadataTask = { runtime, revision, task };
+    return task;
+  }
+  /** 查询模型/命令可失败降级，目录错误就地显示，不破坏文本会话。 */
+  private async fetchMetadata(
+    runtime: string,
+    revision: number,
+  ): Promise<void> {
     const results = await Promise.allSettled([
       this.action<{ models: Model[] }>({ type: 'models' }),
       this.action<{ levels: string[] }>({ type: 'thinking_levels' }),
@@ -1492,8 +1537,10 @@ export class Desktop {
     ]);
     if (runtime !== this.runtimeId || revision !== this.modelConfigRevision)
       return;
-    if (results[0].status === 'fulfilled')
+    if (results[0].status === 'fulfilled') {
       this.models = results[0].value.models ?? [];
+      this.modelsError = '';
+    } else this.modelsError = errorMessage(results[0].reason);
     if (results[1].status === 'fulfilled')
       this.levels = results[1].value.levels ?? [];
     if (results[2].status === 'fulfilled')

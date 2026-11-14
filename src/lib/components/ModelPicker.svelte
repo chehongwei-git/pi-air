@@ -9,12 +9,18 @@
     current,
     disabled = false,
     connecting = false,
+    loading = false,
+    error = '',
+    onretry,
     onselect,
   }: {
     models: Model[];
     current?: Model;
     disabled?: boolean;
     connecting?: boolean;
+    loading?: boolean;
+    error?: string;
+    onretry?: () => void;
     onselect: (key: string) => void;
   } = $props();
   let expanded = $state(false);
@@ -85,7 +91,9 @@
       event.preventDefault();
       const controls = [
         input,
-        ...root.querySelectorAll<HTMLButtonElement>('.model-panel button'),
+        ...root.querySelectorAll<HTMLButtonElement>(
+          '.model-panel button:not(:disabled)',
+        ),
       ];
       const index = controls.indexOf(
         document.activeElement as HTMLInputElement,
@@ -152,7 +160,7 @@
     <div class="model-panel" id={panelId} role="region" aria-label="选择模型">
       <div class="panel-heading">
         <strong>选择模型</strong><span role="status"
-          >{matches.length} 个模型</span
+          >{loading ? '正在加载模型…' : `${matches.length} 个模型`}</span
         >
       </div>
       <label class="model-search"
@@ -167,7 +175,24 @@
           spellcheck="false"
         />
       </label>
-      <div class="model-list">
+      {#if error && !loading}
+        <div class="catalog-error">
+          <p role="alert">模型目录加载失败：{error}</p>
+          {#if onretry}<button
+              type="button"
+              onmousedown={(event) => {
+                event.preventDefault();
+                event.currentTarget.focus({ preventScroll: true });
+              }}
+              onclick={() => {
+                // 重试后错误区会卸载，先回到搜索框，避免焦点丢失关闭整个面板。
+                input?.focus({ preventScroll: true });
+                onretry?.();
+              }}>重试加载模型</button
+            >{/if}
+        </div>
+      {/if}
+      <div class="model-list" aria-busy={loading}>
         {#each groups as group (group.provider)}
           <section aria-label={group.provider}>
             <div class="group-heading">
@@ -200,9 +225,13 @@
             {/each}
           </section>
         {:else}<p class="empty">
-            {search.trim()
-              ? '没有匹配的模型，试试其他名称或服务商。'
-              : '暂无可用模型，请在设置中配置服务商。'}
+            {loading
+              ? '正在读取可用模型，请稍候…'
+              : error
+                ? '目录尚未加载成功，当前选择仍保留。'
+                : search.trim()
+                  ? '没有匹配的模型，试试其他名称或服务商。'
+                  : '暂无可用模型，请在设置中配置服务商。'}
           </p>{/each}
         {#if matches.length > limit}<button
             type="button"
@@ -386,6 +415,22 @@
     margin-top: 7px;
     font-size: 12px;
     color: var(--muted);
+  }
+  .catalog-error {
+    margin-top: 8px;
+    padding: 8px;
+    border-radius: 8px;
+    background: var(--surface);
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+  .catalog-error p {
+    margin: 0 0 7px;
+    color: var(--error);
+  }
+  .catalog-error button {
+    min-height: 28px;
+    font-size: 12px;
   }
   .empty {
     padding: 18px 8px;

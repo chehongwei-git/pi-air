@@ -177,7 +177,17 @@ export default function desktopBridge(pi) {
       ctx.model.reasoning = pi.getThinkingLevel() !== 'off';
     }
   };
-  pi.on('session_start', syncReasoning);
+  pi.on('session_start', async (event, ctx) => {
+    syncReasoning(event, ctx);
+    // RPC 只读可用模型快照；冷启动须等待认证目录收敛，不能等首次生成才补齐。
+    // 仅刷新本地配置，不发现远端模型、不重选当前模型或修改会话强度。
+    const result = await ctx.modelRegistry.refresh({ allowNetwork: false });
+    const error = ctx.modelRegistry.getError();
+    if (error) throw new Error(`模型目录加载失败：${error}`);
+    if (result?.aborted) throw new Error('模型目录加载已取消。');
+    if (result?.errors?.size)
+      throw new Error('部分服务商的模型目录加载失败，请检查配置后重试。');
+  });
   pi.on('model_select', syncReasoning);
   pi.on('thinking_level_select', syncReasoning);
   pi.on('before_agent_start', syncReasoning);
