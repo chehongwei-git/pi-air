@@ -65,6 +65,9 @@ pub fn tree_entries(data: &Value) -> Result<Value> {
 #[derive(Default)]
 pub struct Projection {
     pub messages: Vec<Message>,
+    bookmarks: Vec<Value>,
+    bookmark_indexes: BTreeMap<String, usize>,
+    bookmark_revision: u64,
     active_id: Option<String>,
     blocks: BTreeMap<usize, (String, String)>,
     counter: u64,
@@ -93,6 +96,9 @@ impl Projection {
     /// 新会话或恢复成功后才能清空；取消切换不得调用。
     pub fn reset(&mut self) {
         self.messages.clear();
+        self.bookmarks.clear();
+        self.bookmark_indexes.clear();
+        self.bookmark_revision = self.bookmark_revision.wrapping_add(1);
         self.blocks.clear();
         self.active_id = None;
         self.tools.clear();
@@ -317,6 +323,7 @@ impl Projection {
     }
     /// 稳定 ID upsert，工具结果与执行结束不会在对话中重复显示。
     fn upsert(&mut self, message: Message, store: &mut Store) -> Result<()> {
+        self.index_bookmark(&message);
         if let Some(index) = self.messages.iter().position(|m| m.id == message.id) {
             self.messages[index] = message.clone();
         } else {
@@ -675,6 +682,7 @@ impl Projection {
                 }
                 message.process = self.process.clone();
             }
+            self.index_bookmark(&message);
             self.messages.push(message);
         }
         // 后续消息持有整组最终时间，反向同步到分页边界之前的过程消息。
@@ -694,6 +702,90 @@ impl Projection {
         }
         self.process = None;
         Ok(())
+    }
+    /// 每条正式用户消息只计算一次摘要；助手 token 和目录查询不扫描正文。
+    fn index_bookmark(&mut self, message: &Message) {
+        if message.role != "user" {
+            return;
+        }
+        let mut label = String::new();
+        if let Some(parts) = &message.text_parts {
+            for part in parts
+                .iter()
+                .filter(|part| part.kind != "files" && part.kind != "skill")
+            {
+                for word in part.text.split_whitespace() {
+                    if !label.is_empty() {
+                        label.push(' ');
+                    }
+                    label.extend(
+                        word.chars()
+                            .take(100usize.saturating_sub(label.chars().count())),
+                    );
+                    if label.chars().count() >= 100 {
+                        break;
+                    }
+                }
+                if label.chars().count() >= 100 {
+                    break;
+                }
+            }
+            if label.is_empty() {
+                if let Some(skill) = parts.iter().find_map(|part| part.skill.as_ref()) {
+                    label = format!("使用 {}", skill.name.chars().take(90).collect::<String>());
+                } else {
+                    let count: usize = parts
+                        .iter()
+                        .filter_map(|part| part.files.as_ref())
+                        .map(Vec::len)
+                        .sum();
+                    if count > 0 {
+                        label = format!("文件 × {count}");
+                    }
+                }
+            }
+        } else {
+            // 原始 Skill 识别发生在投影阶段，此处输入最多是 64KiB 预览。
+            label = crate::text_presentation::session_preview(&message.text);
+        }
+        if label.is_empty() {
+            label = if message.images.is_empty() {
+                "用户消息".into()
+            } else {
+                format!("图片 × {}", message.images.len())
+            };
+        }
+        let item = json!({"id":message.id,"label":label});
+        if let Some(index) = self.bookmark_indexes.get(&message.id) {
+            self.bookmarks[*index] = item;
+        } else {
+            self.bookmark_indexes
+                .insert(message.id.clone(), self.bookmarks.len());
+            self.bookmarks.push(item);
+        }
+    }
+    /// 每批最多 256 项且不超过 128KiB；快照重建后拒绝旧游标，追加消息不使已有页失效。
+    pub fn bookmark_page(&self, offset: usize, revision: Option<&str>) -> Result<Value> {
+        let current = self.bookmark_revision.to_string();
+        if revision.is_some_and(|value| value != current) {
+            return Err(AppError::new("BOOKMARK_REVISION", "目录历史已变化，请重试"));
+        }
+        if offset > self.bookmarks.len() {
+            return Err(AppError::new("BOOKMARK_CURSOR", "目录游标无效，请重试"));
+        }
+        let mut end = offset;
+        let mut bytes = 0;
+        while end < self.bookmarks.len() && end - offset < 256 {
+            let size = self.bookmarks[end].to_string().len();
+            if end > offset && bytes + size > 128 * 1024 {
+                break;
+            }
+            bytes += size;
+            end += 1;
+        }
+        Ok(
+            json!({"items":self.bookmarks[offset..end],"next":end,"done":end==self.bookmarks.len(),"revision":current}),
+        )
     }
     /// 历史分页游标是当前投影的数组位置，前端不需要接收完整快照。
     pub fn page(&self, before: Option<usize>) -> Value {
@@ -1187,6 +1279,41 @@ mod tests {
             store.batch("r", 0).unwrap().events.last().unwrap()["state"],
             "running"
         );
+    }
+    /// 万条目录查询只切摘要索引；不包含正文、工具和图片，重建拒绝旧修订。
+    #[test]
+    fn bookmark_index_is_bounded_and_revision_checked() {
+        let mut projection = Projection::default();
+        let mut store = Store::new().unwrap();
+        let message = projection
+            .message(
+                &json!({"role":"user","content":"😀".repeat(1000)}),
+                "first".into(),
+                &mut store,
+            )
+            .unwrap();
+        for index in 0..10000 {
+            let mut next = message.clone();
+            next.id = index.to_string();
+            projection.index_bookmark(&next);
+        }
+        let page = projection.bookmark_page(0, None).unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 256);
+        assert!(page.to_string().len() < 128 * 1024 + 1024);
+        let item = &page["items"][0];
+        assert_eq!(item["label"].as_str().unwrap().chars().count(), 100);
+        assert_eq!(item.as_object().unwrap().len(), 2);
+        assert_eq!(
+            projection
+                .bookmark_page(9984, page["revision"].as_str())
+                .unwrap()["done"],
+            true
+        );
+        projection.reset();
+        assert!(projection
+            .bookmark_page(0, page["revision"].as_str())
+            .is_err());
+        assert!(projection.bookmark_page(1, None).is_err());
     }
     #[test]
     fn only_settled_ends_run() {

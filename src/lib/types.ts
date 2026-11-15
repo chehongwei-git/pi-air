@@ -211,6 +211,13 @@ export interface Command {
   source: string;
   argumentHint?: string;
 }
+/** 目录只传摘要，不携带正文或图片引用。 */
+export interface BookmarkPage {
+  items: { id: string; label: string }[];
+  next: number;
+  done: boolean;
+  revision: string;
+}
 export interface HistoryPage {
   messages: Message[];
   before: number;
@@ -345,6 +352,7 @@ export type Action =
         | 'session_tree';
     }
   | { type: 'history'; before?: number }
+  | { type: 'bookmarks'; offset: number; revision?: string }
   | {
       type: 'extension_response';
       id: string;

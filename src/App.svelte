@@ -1348,6 +1348,13 @@
               {#if session.transcriptMessages.length}
                 <Transcript
                   messages={session.transcriptMessages}
+                  historyKey={`${session.runtimeId}:${session.snapshot.sessionFile ?? ''}`}
+                  bookmarkHistory={(offset, revision) =>
+                    session.action<import('./lib/types').BookmarkPage>({
+                      type: 'bookmarks',
+                      offset,
+                      revision,
+                    })}
                   project={session.snapshot.cwd || session.project}
                   edit={session.messageEdit}
                   editUnavailable={session.run !== 'idle' ||

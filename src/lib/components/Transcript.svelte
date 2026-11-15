@@ -5,6 +5,8 @@
   import FilePanel from './FilePanel.svelte';
   import { reviewKey, type ReviewLayoutState } from '../review-layout.svelte';
   import MessageView from './MessageView.svelte';
+  import ConversationBookmarks from './ConversationBookmarks.svelte';
+  import { conversationBookmarks } from '../conversation-bookmarks';
   import type { MessageEdit } from '../message-edit';
   import ProcessGroup from './ProcessGroup.svelte';
   import ConversationActivity from './ConversationActivity.svelte';
@@ -14,9 +16,16 @@
   import TextPanel from './TextPanel.svelte';
   import ChangePanel from './ChangePanel.svelte';
   import Icon from './Icon.svelte';
-  import type { ContentPage, Message, MessageTextPart } from '../types';
+  import type {
+    ContentPage,
+    BookmarkPage,
+    Message,
+    MessageTextPart,
+  } from '../types';
   let {
     messages,
+    bookmarkHistory,
+    historyKey = '',
     project = '',
     edit,
     editUnavailable,
@@ -41,6 +50,12 @@
     read,
   }: {
     messages: Message[];
+    /** 独立读取提问目录，不向正文插入历史。 */
+    bookmarkHistory?: (
+      offset: number,
+      revision?: string,
+    ) => Promise<BookmarkPage>;
+    historyKey?: string;
     /** 必须由所属会话提供，不能取全局当前项目。 */
     project?: string;
     edit?: MessageEdit | null;
@@ -99,6 +114,77 @@
   let sentinel: HTMLDivElement;
   let follow = $state(true);
   let atBottom = $state(true);
+  let bookmarkCurrent = $state('');
+  let bookmarkTarget = $state('');
+  let bookmarkRequest = 0;
+  let bookmarkFrame = 0;
+  let highlightTimer: ReturnType<typeof setTimeout>;
+  const messageNodes = new Map<string, HTMLElement>();
+  let bookmarkItems = $derived(conversationBookmarks(messages));
+  /** 缓存节点引用，滚动时二分查找用户消息，不扫描长工具输出。 */
+  function messageNode(node: HTMLElement, id: string) {
+    messageNodes.set(id, node);
+    return {
+      destroy() {
+        if (messageNodes.get(id) === node) messageNodes.delete(id);
+      },
+    };
+  }
+  function updateBookmark(): void {
+    cancelAnimationFrame(bookmarkFrame);
+    bookmarkFrame = requestAnimationFrame(() => {
+      if (!alive || !active || !viewport || !bookmarkItems.length) return;
+      const top = viewport.getBoundingClientRect().top + 25;
+      let low = 0;
+      let high = bookmarkItems.length - 1;
+      let result = 0;
+      while (low <= high) {
+        const middle = (low + high) >>> 1;
+        const node = messageNodes.get(bookmarkItems[middle].id);
+        if (node && node.getBoundingClientRect().top <= top) {
+          result = middle;
+          low = middle + 1;
+        } else high = middle - 1;
+      }
+      bookmarkCurrent =
+        bookmarkItems[atBottom ? bookmarkItems.length - 1 : result].id;
+    });
+  }
+  /** 分批补齐目标前的正文，每次提交沿用阅读锚点补偿；取消后不再继续加载或定位。 */
+  async function selectBookmark(id: string): Promise<void> {
+    const request = ++bookmarkRequest;
+    pauseFollow();
+    scrollState.follow = false;
+    while (!messageNodes.has(id) && hasMore) {
+      if (!alive || !active || request !== bookmarkRequest) return;
+      if (pending || loading) throw new Error('历史正在加载，请稍后再试');
+      const first = messages[0]?.id;
+      await older();
+      if (!alive || !active || request !== bookmarkRequest) return;
+      if (error) throw new Error(error);
+      if (messages[0]?.id === first) throw new Error('历史加载未前进，请重试');
+    }
+    if (!alive || !active || request !== bookmarkRequest) return;
+    const node = messageNodes.get(id);
+    if (!node) throw new Error('当前分支中未找到这条提问，请重新打开目录');
+    // 使用相对偏移并换算 WebView 缩放；只滚动当前正文容器。
+    const scale =
+      viewport.getBoundingClientRect().height / viewport.offsetHeight || 1;
+    viewport.scrollTop +=
+      (node.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top) /
+        scale -
+      24;
+    lastScrollTop = viewport.scrollTop;
+    scrollState.top = viewport.scrollTop;
+    bookmarkCurrent = id;
+    bookmarkTarget = id;
+    clearTimeout(highlightTimer);
+    highlightTimer = setTimeout(() => {
+      bookmarkTarget = '';
+    }, 1400);
+    atBottom = isAtBottom();
+  }
   /** 滚动位置可能含小数像素，使用与浏览器取整相容的底部容差。 */
   function isAtBottom(): boolean {
     return (
@@ -225,6 +311,7 @@
       lastScrollHeight = viewport.scrollHeight;
       lastClientHeight = viewport.clientHeight;
       checkOlder();
+      updateBookmark();
     });
   }
   function pauseFollow(): void {
@@ -294,6 +381,7 @@
     scrollState.top = top;
     scrollState.follow = follow;
     checkOlder();
+    updateBookmark();
   }
   onMount(() => {
     mounted = true;
@@ -351,6 +439,9 @@
       observer.disconnect();
       resize.disconnect();
       cancelAnimationFrame(frame);
+      cancelAnimationFrame(bookmarkFrame);
+      clearTimeout(highlightTimer);
+      bookmarkRequest++;
     };
   });
   $effect(() => {
@@ -426,7 +517,12 @@
     </div>
     <div class="message-list" bind:this={content}>
       {#snippet renderMessage(message: Message)}
-        <div class="message-item" data-message-id={message.id}>
+        <div
+          class="message-item"
+          class:bookmark-highlight={bookmarkTarget === message.id}
+          data-message-id={message.id}
+          use:messageNode={message.id}
+        >
           {#if isPlanComplete(message)}
             <PlanMessage
               {message}
@@ -494,6 +590,18 @@
       <ConversationActivity {activity} />
     </div>
   </div>
+  <ConversationBookmarks
+    {messages}
+    {active}
+    ready={!loading}
+    {historyKey}
+    current={bookmarkCurrent}
+    onhistory={bookmarkHistory}
+    onselect={selectBookmark}
+    oncancel={() => {
+      bookmarkRequest++;
+    }}
+  />
   {#if panelOpen}
     <div class="review-panel-content" hidden={!active} use:mountPanel>
       {#if fileTarget}
@@ -539,10 +647,20 @@
   /* 箭头始终贴近正文底部，不依赖输入器或 Plan 操作区的动态高度。 */
   .transcript-workspace {
     position: relative;
+    container-type: size;
     /* 将箭头与正文限制在输入区下层，避免挡住向上展开的模型菜单。 */
     z-index: 0;
   }
   .scroll-bottom {
     bottom: 16px;
+  }
+  .bookmark-highlight {
+    border-radius: 10px;
+    background: var(--accent-soft);
+  }
+  @media (max-width: 900px) {
+    .has-change :global(.bookmarks) {
+      visibility: hidden;
+    }
   }
 </style>

@@ -246,6 +246,11 @@ pub enum Action {
     History {
         before: Option<usize>,
     },
+    /// 只读取现有投影中的轻量目录，不重新请求 Pi 或读取正文。
+    Bookmarks {
+        offset: usize,
+        revision: Option<String>,
+    },
     ExtensionResponse {
         id: String,
         value: Value,

@@ -406,6 +406,13 @@ impl Handle {
             }
             Action::Commands => self.rpc(json!({"type":"get_commands"}), Kind::Query).await,
             Action::State => self.rpc(json!({"type":"get_state"}), Kind::Query).await,
+            Action::Bookmarks { offset, revision } => {
+                self.rpc(
+                    json!({"type":"desktop_bookmarks","offset":offset,"revision":revision}),
+                    Kind::Query,
+                )
+                .await
+            }
             Action::History { before } => {
                 self.rpc(
                     json!({"type":"get_entries","_before":before}),
@@ -656,6 +663,12 @@ async fn actor(
                     }
                     if matches!(kind, Kind::Restore) && restored {
                         let before = command["_before"].as_u64().map(|v| v as usize); let _ = reply.send(Ok(projection.page(before))); continue;
+                    }
+                    if command["type"] == "desktop_bookmarks" {
+                        let result = if restored {
+                            projection.bookmark_page(command["offset"].as_u64().unwrap_or(0) as usize, command["revision"].as_str())
+                        } else { Err(AppError::new("BOOKMARK_NOT_READY", "会话历史尚未就绪，请重试")) };
+                        let _ = reply.send(result); continue;
                     }
                     if command["type"] == "desktop_changes" {
                         let (recorder, records) = tokio::task::spawn_blocking(move || { let records = changes.list(); (changes, records) }).await.expect("changes recorder panicked");
@@ -1158,6 +1171,21 @@ mod tests {
                 .iter()
                 .find(|m| m["role"] == "user" && m["text"] == "hello")
                 .unwrap();
+            // 目录查询直接切宿主索引，不重新请求 Pi；真实历史 ID 与正文定位一致。
+            let bookmarks = handle
+                .action(Action::Bookmarks {
+                    offset: 0,
+                    revision: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(bookmarks["done"], true);
+            assert!(bookmarks["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["id"] == user["id"] && item["label"] == "hello"));
+            assert!(!bookmarks.to_string().contains("contentRef"));
             assert_eq!(user["textParts"][0]["kind"], "paste");
             assert_eq!(
                 handle
