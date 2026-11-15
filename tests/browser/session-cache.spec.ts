@@ -141,10 +141,26 @@ test('cached conversation stays readable and editable during reconnect without l
   await page.goto('/');
   const transcript = page.locator('.transcript:visible');
   await expect(transcript).toContainText('/cache/1.jsonl');
+  // 正文出现不代表首次布局与到底跟随已完成，先等首屏就绪再建立阅读锚点。
+  await expect
+    .poll(() =>
+      transcript.evaluate(
+        (node) => node.scrollHeight - node.scrollTop - node.clientHeight,
+      ),
+    )
+    .toBeLessThan(3);
   await transcript.evaluate((node) => {
+    // 与真实上翻一致，先用滚轮表达暂停跟随的意图，再确定性地设置阅读位置。
+    node.dispatchEvent(
+      new WheelEvent('wheel', { deltaY: -160, bubbles: true }),
+    );
     node.scrollTop = 1500;
     node.dispatchEvent(new Event('scroll'));
   });
+  await expect(page.getByRole('button', { name: '回到底部' })).toBeVisible();
+  await expect
+    .poll(() => transcript.evaluate((node) => node.scrollTop))
+    .toBeCloseTo(1500, 0);
   const before = await transcript.evaluate((node) => node.scrollTop);
   await transcript.locator('[data-message-id="entry-0"]').evaluate((node) => {
     node.setAttribute('data-cache-marker', 'original');
