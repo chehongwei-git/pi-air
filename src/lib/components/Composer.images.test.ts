@@ -30,6 +30,117 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 describe('image composer', () => {
+  it.each([false, true])(
+    'pastes native files once even when WebView exposes files=%s',
+    async (exposed) => {
+      native.enabled = true;
+      native.invoke.mockResolvedValue([
+        {
+          id: 'key',
+          kind: 'path',
+          name: 'prod.keys',
+          path: '/tmp/prod.keys',
+          directory: false,
+        },
+      ]);
+      const onsend = vi.fn();
+      const view = render(Composer, { value: '草稿', onsend, onstop: vi.fn() });
+      await fireEvent.paste(view.getByRole('textbox'), {
+        clipboardData: {
+          files: exposed ? [new File(['secret'], 'prod.keys')] : [],
+          getData: () => '/tmp/prod.keys',
+        },
+      });
+      await waitFor(() =>
+        expect(
+          view.getAllByRole('button', { name: /查看文件引用/ }),
+        ).toHaveLength(1),
+      );
+      expect(native.invoke).toHaveBeenCalledWith('paste_files', {
+        budget: { count: 0, bytes: 0 },
+      });
+      expect(view.getByRole('textbox')).toHaveValue('草稿');
+      expect(view.queryByRole('alert')).not.toBeInTheDocument();
+      expect(onsend).not.toHaveBeenCalled();
+      await fireEvent.click(
+        view.getByRole('button', { name: '移除prod.keys' }),
+      );
+      expect(
+        view.queryByRole('button', { name: /查看文件引用/ }),
+      ).not.toBeInTheDocument();
+    },
+  );
+  it.each([false, true])(
+    'retains text insertion and undo when native lookup fails=%s',
+    async (failed) => {
+      native.enabled = true;
+      if (failed)
+        native.invoke.mockRejectedValue(new Error('clipboard unavailable'));
+      else native.invoke.mockResolvedValue([]);
+      const view = render(Composer, {
+        value: '前后',
+        onsend: vi.fn(),
+        onstop: vi.fn(),
+      });
+      const input = view.getByRole('textbox') as HTMLTextAreaElement;
+      input.setSelectionRange(1, 1);
+      await fireEvent.paste(input, {
+        clipboardData: { files: [], getData: () => '粘贴' },
+      });
+      await waitFor(() => expect(input).toHaveValue('前粘贴后'));
+      await fireEvent.keyDown(input, { key: 'z', ctrlKey: true });
+      await waitFor(() => expect(input).toHaveValue('前后'));
+      expect(view.queryByRole('alert')).not.toBeInTheDocument();
+    },
+  );
+  it('blocks sending while reading and discards clipboard results on context change', async () => {
+    native.enabled = true;
+    let resolve!: (items: unknown[]) => void;
+    native.invoke.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const onsend = vi.fn();
+    const view = render(Composer, {
+      value: '草稿',
+      historyKey: 'first',
+      onsend,
+      onstop: vi.fn(),
+    });
+    await fireEvent.paste(view.getByRole('textbox'), {
+      clipboardData: { files: [], getData: () => '旧文本' },
+    });
+    expect(view.getByRole('button', { name: '发送消息' })).toBeDisabled();
+    await fireEvent.keyDown(view.getByRole('textbox'), { key: 'Enter' });
+    expect(onsend).not.toHaveBeenCalled();
+    await view.rerender({ historyKey: 'second', value: '新草稿' });
+    resolve([]);
+    await waitFor(() =>
+      expect(view.getByRole('button', { name: '发送消息' })).toBeEnabled(),
+    );
+    expect(view.getByRole('textbox')).toHaveValue('新草稿');
+  });
+  it('shows native file-read errors inline without losing the draft', async () => {
+    native.enabled = true;
+    native.invoke.mockRejectedValue(new Error('无法访问系统剪贴板'));
+    const view = render(Composer, {
+      value: '草稿',
+      onsend: vi.fn(),
+      onstop: vi.fn(),
+    });
+    await fireEvent.paste(view.getByRole('textbox'), {
+      clipboardData: {
+        files: [new File(['key'], 'prod.keys')],
+        getData: () => '',
+      },
+    });
+    await waitFor(() =>
+      expect(view.getByRole('alert')).toHaveTextContent('无法访问系统剪贴板'),
+    );
+    expect(view.getByRole('textbox')).toHaveValue('草稿');
+  });
   it('uses the native picker, prevents duplicate selection and ignores late results', async () => {
     native.enabled = true;
     let resolve!: (images: unknown[]) => void;

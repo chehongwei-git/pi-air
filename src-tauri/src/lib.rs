@@ -1,4 +1,5 @@
 //! 应用服务入口：Tauri 命令只表达业务意图；平台与协议实现不泄漏到 UI。
+mod clipboard_files;
 mod diagnostics;
 mod file_import;
 mod file_preview;
@@ -521,6 +522,21 @@ async fn pick_files(
         .await
         .map_err(|_| AppError::new("FILE", "文件选择任务失败，请重试。"))?
 }
+/// 立即捕获剪贴板来源，再排队复用附件分类，避免排队期间剪贴板被后续复制替换。
+#[tauri::command]
+async fn paste_files(
+    state: State<'_, AppState>,
+    budget: file_import::Budget,
+) -> Result<Vec<Value>> {
+    let paths = tokio::task::spawn_blocking(clipboard_files::paths)
+        .await
+        .map_err(|_| AppError::new("CLIPBOARD", "剪贴板读取任务失败，请重试。"))??;
+    let _gate = state.file_reads.lock().await;
+    tokio::task::spawn_blocking(move || file_import::read(paths, budget))
+        .await
+        .map_err(|_| AppError::new("CLIPBOARD", "粘贴文件读取失败，请重试。"))
+}
+
 /// 路径只来自当前窗口的原生 Drop，票据消费后无法再次读取。
 #[tauri::command]
 async fn read_dropped_files(
@@ -703,6 +719,7 @@ pub fn run() {
             plugin_detail,
             plugin_command,
             pick_files,
+            paste_files,
             preview_file,
             open_message_file,
             read_dropped_files,

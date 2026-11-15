@@ -123,6 +123,10 @@ test.beforeEach(async ({ page }) => {
             verified: true,
             snapshot: { model, sessionFile: '/session' },
           };
+        if (command === 'paste_files') {
+          host.fileReads.push({ command, ...args });
+          return structuredClone(host.clipboardFiles ?? []);
+        }
         if (command === 'pick_files' || command === 'read_dropped_files') {
           host.fileReads.push({ command, ...args });
           return structuredClone(host.files);
@@ -154,6 +158,38 @@ test.beforeEach(async ({ page }) => {
   await expect
     .poll(() => page.evaluate(() => (window as any).hasFileListener()))
     .toBe(true);
+});
+
+test('native clipboard files become removable attachments without inserting file names', async ({
+  page,
+}) => {
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await input.fill('检查附件');
+  await page.evaluate(() => {
+    (window as any).clipboardFiles = (window as any).files;
+  });
+  await input.evaluate((node) => {
+    const data = new DataTransfer();
+    data.setData('text/plain', '不应插入的文件名');
+    node.dispatchEvent(
+      new ClipboardEvent('paste', {
+        clipboardData: data,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  await expect(page.locator('[data-attachment]')).toHaveCount(4);
+  await expect(input).toHaveValue('检查附件');
+  await page.getByRole('button', { name: '移除icon.svg' }).click();
+  await expect(page.locator('[data-attachment]')).toHaveCount(3);
+  await page.getByRole('button', { name: '发送消息', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).sent.length))
+    .toBe(1);
+  expect(
+    await page.evaluate(() => (window as any).sent[0].message),
+  ).not.toContain('icon.svg');
 });
 
 test('native drop respects input bounds, keeps hover geometry stable and sends mixed attachments', async ({

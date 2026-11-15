@@ -174,12 +174,52 @@
       }),
     );
   }
-  function paste(event: ClipboardEvent): void {
+  function paste(event: ClipboardEvent): void | Promise<boolean> {
     const files = Array.from(event.clipboardData?.files ?? []);
-    if (files.length) {
-      event.preventDefault();
-      addFiles(files);
+    if (!isTauri()) {
+      if (files.length) {
+        event.preventDefault();
+        addFiles(files);
+      }
+      return;
     }
+    event.preventDefault();
+    if (!canImport()) return Promise.resolve(true);
+    const request = importGeneration;
+    const text = event.clipboardData?.getData?.('text/plain') ?? '';
+    // 原生查询必须覆盖 files 为空的 Finder/文件管理器事件；普通文本失败时仍可粘贴。
+    const operation = invoke<ImportedFile[]>('paste_files', {
+      budget: imageBudget(attachments),
+    })
+      .then(async (items) => {
+        if (request !== importGeneration) return { items: [], handled: true };
+        if (items.length) return { items, handled: true };
+        if (files.length)
+          return {
+            items: await importBrowserFiles(files, attachments),
+            handled: true,
+          };
+        return { items: [], handled: false };
+      })
+      .catch(async (cause) => {
+        if (request !== importGeneration) return { items: [], handled: true };
+        // 截图仍可直接读取；普通文件不能因权限错误而伪造本地路径。
+        if (
+          files.length &&
+          files.every((file) => file.type.startsWith('image/'))
+        )
+          return {
+            items: await importBrowserFiles(files, attachments),
+            handled: true,
+          };
+        if (text && !files.length) return { items: [], handled: false };
+        throw cause;
+      });
+    enqueueImport(operation.then(({ items }) => items));
+    return operation.then(
+      ({ handled }) => handled,
+      () => true,
+    );
   }
   onMount(() =>
     registerFileDrop({

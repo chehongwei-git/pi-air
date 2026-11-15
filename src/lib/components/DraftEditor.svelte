@@ -38,7 +38,7 @@
     controls?: string;
     activeDescendant?: string;
     onkeydown: (event: KeyboardEvent) => void;
-    onpaste: (event: ClipboardEvent) => void;
+    onpaste: (event: ClipboardEvent) => void | Promise<boolean>;
     oninput: () => void;
     oncompositionstart: () => void;
     oncompositionend: () => void;
@@ -301,10 +301,24 @@
     if (fold) notice = '已收纳粘贴文本，发送时保留全文';
   }
   function paste(event: ClipboardEvent): void {
-    onpaste(event);
-    if (event.defaultPrevented || disabled || composing) return;
-    const text = event.clipboardData?.getData('text/plain') ?? '';
-    if (!text) return;
+    if (disabled || composing) return;
+    // ClipboardEvent 数据只在事件内可靠；异步探测期间保留文本与上下文。
+    const text = event.clipboardData?.getData?.('text/plain') ?? '';
+    const saved = snapshot();
+    const key = context;
+    const result = onpaste(event);
+    if (result instanceof Promise) {
+      event.preventDefault();
+      void result.then((handled) => {
+        if (handled || !text || disabled || context !== key) return;
+        // 未编辑时使用原选区；用户已继续输入则在当前光标插入，不能覆盖新工作。
+        if (draftText(saved.parts) === value)
+          setSelectionRange(saved.start, saved.end);
+        insert(text, allowFold && foldable(text));
+      });
+      return;
+    }
+    if (event.defaultPrevented || !text) return;
     event.preventDefault();
     insert(text, allowFold && foldable(text));
   }
