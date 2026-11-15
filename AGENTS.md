@@ -10,10 +10,18 @@
 ## 核心规约：代码修改后必须通过所有测试
 
 - **全量验证是完成条件**：任何代码、测试、脚本、依赖或构建配置修改后，必须在最终修改版本上运行并通过全部自动化测试，不得仅运行受影响的用例或以单独重跑成功替代全量通过。同时必须通过类型检查、格式检查、静态分析和构建。
-- **最低验证清单**：`npm run check`、`npm test`、`node --test scripts/desktop.test.mjs`、`npm run test:browser`、`npm run build`，以及 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml --locked`。新增测试套件必须同步纳入清单与 CI；发布前还须通过 Windows、macOS、Linux 的 CI 检查和原生打包。
+- **最低验证清单**：`npm run check`、`npm test`、`node --test scripts/desktop.test.mjs`、`node --test scripts/release-notes.test.mjs`、`npm run test:browser`、`npm run build`，以及 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml --locked`。新增测试套件必须同步纳入清单与 CI；发布前还须通过 Windows、macOS、Linux 的 CI 检查和原生打包。
 - **不得绕过失败**：不得通过删除测试、增加 skip/ignore、弱化断言、关闭检查或忽略退出码制造通过。测试与正确需求不一致时，应修正夹具或断言并保留等效覆盖；偶发失败也必须排查原因，不能以反复重跑碰巧成功作为修复。
 - **未验证不等于通过**：环境缺失、平台不可用、既有失败或忽略项必须明确记录原因、范围和后续验证方式。未执行的测试不得计为通过；任一必需检查未通过时，任务只能标记为“待验证”或“阻塞”，不得宣称全部完成或发布。
 - **保留验证记录**：交付说明须列出实际执行的命令、通过/失败/忽略数量及平台范围；修复后再次修改代码，必须重新执行完整验证。
+
+## 核心规约：发布说明必须完整且可追溯
+
+- **日期版本**：按发布当天的年.月.日命名，不将上一版本机械递增；同步全部清单和锁文件。
+- **完整范围**：以当前发布提交最近的正式版本祖先标签为基线，核对该标签到当前标签的全部提交，不使用固定旧文案，不遗漏合并分支、修复、测试、构建或发布提交。首次发布明确标注无基线。
+- **先总结后明细**：在 `docs/releases/<版本>.md` 编写并核实功能总结、修复、性能与测试、回退和限制；由 `scripts/release-notes.mjs` 自动附加完整提交数、每条提交及链接、比较范围和完整差异链接、安装与限制。被回退或替代的功能不得重复计为已交付。发布前预览生成结果，缺少总结或版本不一致时阻止发布。
+- **区分标签与 Release**：附注标签包含简明分类摘要和基线，GitHub Release 使用完整说明；生成内容必须读取标签对应提交，而非未提交工作区。全部本地检查及三平台 CI、原生打包通过前不得宣称发布完成，原生交互验收另行记录。
+- **同名标签不可静默覆盖**：移动或重建已推送标签、撤下或替换已发布附件必须获得用户明确授权，记录旧标签对象与提交，停止旧发布流水线，避免旧附件与新源码混用；默认发布流程继续拒绝覆盖已公开 Release。
 
 ## 跨平台兼容要求
 

@@ -102,6 +102,7 @@ npm test
 
 # 开发启动脚本回归测试
 node --test scripts/desktop.test.mjs
+node --test scripts/release-notes.test.mjs
 
 # 前端生产构建（不是桌面安装包）
 npm run build
@@ -156,11 +157,12 @@ Tauri 会自动合并对应平台的配置并构建前端：
    ```
 
 3. 提交所有待发布改动后，确认 `package.json`、`package-lock.json`（包括根包记录）、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本一致，并更新 `src-tauri/Cargo.lock` 中本项目的版本。当前版本为 `2026.11.6`，采用年.月.日的日期版本格式。未来升级版本后应重新运行测试并提交锁文件。
-4. 推送版本标签，即授权自动公开该版本：
+4. 按当天日期命名（不要机械递增版本），在 `docs/releases/<版本>.md` 核实分类总结、回退、验证和限制，按 [发布核心规约](AGENTS.md) 审阅上一个正式祖先标签以来的全部提交。附注标签写入简明分类摘要和基线，再生成并预览完整 Release 正文：
 
    ```sh
-   git tag -a v2026.11.6 -m "发布 2026.11.6"
-   git push github v2026.11.6
+   git tag -a v2026.11.15 -m "发布 2026.11.15：消息编辑、提问目录、插件与文件体验；基线 v2026.11.7"
+   node scripts/release-notes.mjs v2026.11.15 YOUR_ACCOUNT/pi-desktop release-notes.md
+   git push github v2026.11.15
    ```
 
 5. 在 GitHub → Actions 查看 `desktop-release`，全部成功后在 Releases 下载附件。只推送分支不会创建 Release。当前仅支持 `v主版本.次版本.修订版本` 正式版本，不支持预发布标签。
