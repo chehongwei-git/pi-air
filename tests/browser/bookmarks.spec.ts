@@ -96,10 +96,13 @@ for (const narrow of [false, true]) {
 test('complete directory loads without hover, caches requests and virtualizes ten thousand prompts', async ({
   page,
 }) => {
-  await setup(page, '?large');
+  // 40 页串行加载且每页主动让出 40ms；模拟慢 IPC，避免依赖默认 5 秒预算。
+  await setup(page, '?large&historyDelay=125');
   await expect
-    .poll(() => page.evaluate(() => (window as any).historyCalls))
-    .toBe(40);
+    .poll(() => page.evaluate(() => (window as any).historyDone), {
+      timeout: 20000,
+    })
+    .toBe(true);
   await page.waitForTimeout(150);
   expect(await page.evaluate(() => (window as any).historyCalls)).toBe(40);
   expect(await page.locator('[data-message-id]').count()).toBe(40);
@@ -127,9 +130,12 @@ test('hover timing and node churn diagnostic for a complete large directory', as
   page,
 }) => {
   await setup(page, '?large');
+  // 等待最后一页返回，而不是仅等请求发出；不扩大悬停交互断言的等待时间。
   await expect
-    .poll(() => page.evaluate(() => (window as any).historyCalls))
-    .toBe(40);
+    .poll(() => page.evaluate(() => (window as any).historyDone), {
+      timeout: 20000,
+    })
+    .toBe(true);
   const samples = await page.evaluate(async () => {
     const nav = document.querySelector<HTMLElement>('.bookmarks')!;
     const samples: { latency: number; added: number; removed: number }[] = [];

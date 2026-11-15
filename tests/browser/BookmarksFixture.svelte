@@ -21,6 +21,11 @@
   let key = $state('session-a');
   let active = $state(true);
   host.historyCalls = 0;
+  host.historyDone = false;
+  // 仅测试夹具注入 IPC 延迟，验证串行分页不依赖本机执行速度。
+  const historyDelay = Number(
+    new URLSearchParams(location.search).get('historyDelay') ?? 0,
+  );
   host.bodyCalls = 0;
   host.failHistory = new URLSearchParams(location.search).has('fail');
   host.delay = false;
@@ -51,6 +56,8 @@
     : undefined;
   async function history(offset: number, revision?: string) {
     host.historyCalls++;
+    if (historyDelay > 0)
+      await new Promise<void>((resolve) => setTimeout(resolve, historyDelay));
     if (host.delay)
       await new Promise<void>((resolve) => {
         host.release = resolve;
@@ -60,6 +67,7 @@
       host.catalog ??
       conversationBookmarks(key === 'session-b' ? messages : all);
     const next = Math.min(catalog.length, offset + 256);
+    host.historyDone = next === catalog.length;
     return {
       items: catalog.slice(offset, next),
       next,
