@@ -1,11 +1,11 @@
-# Pi Desktop
+# pi-air
 
 <img width="3840" height="2088" alt="image" src="https://github.com/user-attachments/assets/d07ef884-ad63-45f7-aa6e-199276cb7437" />
 
 
 **为本机 Pi 提供轻量的桌面工作区。**
 
-Pi Desktop 使用 Tauri 2、Svelte 5、TypeScript 与 Rust 构建，通过 RPC 子进程连接已安装的 Pi，将项目、会话、模型配置和工具执行整合到默认中文的桌面界面中。复用系统 WebView，不捆绑 Pi、Node.js 或 Chromium。
+pi-air 使用 Tauri 2、Svelte 5、TypeScript 与 Rust 构建，通过 RPC 子进程连接已安装的 Pi，将项目、会话、模型配置和工具执行整合到默认中文的桌面界面中。复用系统 WebView，不捆绑 Pi、Node.js 或 Chromium。
 
 > 当前版本：**2026.11.6**，仍在持续开发。目标平台为 Windows、macOS 和 Linux，但各平台的验证范围不同；构建配置齐全不代表已完成三平台原生验收。详见[兼容说明](docs/compatibility.md)与[验证记录](docs/validation.md)。
 
@@ -27,7 +27,7 @@ Pi Desktop 使用 Tauri 2、Svelte 5、TypeScript 与 Rust 构建，通过 RPC �
 
 ### 1. 准备环境
 
-Pi Desktop 是桌面客户端，**不能替代 Pi 本身**。请先安装 Pi，确认它能在终端独立启动。
+pi-air 是桌面客户端，**不能替代 Pi 本身**。请先安装 Pi，确认它能在终端独立启动。
 
 源码运行还需要以下环境：
 
@@ -197,7 +197,7 @@ docs/              架构、交互、兼容性与验证文档
 
 ## 反馈与贡献
 
-欢迎通过 Issues 提交问题或建议。报告问题时，请附上操作系统与架构、Pi Desktop / Pi 版本、复现步骤和脱敏后的错误信息。不要提交 API Key、认证文件、完整环境变量或含敏感内容的会话记录。
+欢迎通过 Issues 提交问题或建议。报告问题时，请附上操作系统与架构、pi-air / Pi 版本、复现步骤和脱敏后的错误信息。不要提交 API Key、认证文件、完整环境变量或含敏感内容的会话记录。
 
 提交代码前请遵循 [开发约定](AGENTS.md)，运行与改动相关的检查和测试；涉及交互或兼容性变化时同步文档，并注明未验证的平台与场景。
 

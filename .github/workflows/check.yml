@@ -57,10 +57,10 @@ jobs:
       - name: Archive macOS app
         if: runner.os == 'macOS'
         working-directory: src-tauri/target/release/bundle/macos
-        run: tar -czf "Pi-Desktop-macOS-${{ runner.arch }}.app.tar.gz" "Pi Desktop.app"
+        run: tar -czf "pi-air-macOS-${{ runner.arch }}.app.tar.gz" "pi-air.app"
       - uses: actions/upload-artifact@v6
         with:
-          name: pi-desktop-${{ matrix.os }}-unsigned
+          name: pi-air-${{ matrix.os }}-unsigned
           path: ${{ matrix.artifact }}
           if-no-files-found: error
       # 截图与安装包分开，避免截图掩盖安装包缺失，也保留失败现场。

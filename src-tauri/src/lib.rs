@@ -765,5 +765,5 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("Pi Desktop 启动失败");
+        .expect("pi-air 启动失败");
 }

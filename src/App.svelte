@@ -698,7 +698,7 @@
   <aside class="sidebar" class:open={sidebar} aria-label="项目与历史会话">
     <div class="sidebar-brand">
       <div class="brand-mark"><Icon name="pi" size={23} /></div>
-      <strong>Pi Desktop</strong><button
+      <strong>pi-air</strong><button
         class="icon-button"
         aria-label="收起侧栏"
         title="Ctrl/Cmd+B"

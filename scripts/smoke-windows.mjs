@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 if (process.platform !== 'win32') throw new Error('Windows only');
-const child = spawn(resolve('src-tauri/target/release/pi-desktop.exe'), [], {
+const child = spawn(resolve('src-tauri/target/release/pi-air.exe'), [], {
   stdio: 'ignore',
 });
 const exited = new Promise((resolve, reject) => {

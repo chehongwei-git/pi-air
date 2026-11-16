@@ -12,7 +12,7 @@ export function renderReleaseNotes({
   commits,
 }) {
   const base = `https://github.com/${repository}`;
-  return `# Pi Desktop ${tag}\n\n比较范围：${previous ?? '首次发布'} → ${tag}，共 ${commits.length} 个提交。\n\n${summary.trim()}\n\n## 全部提交\n\n${commits.map(({ hash, subject }) => `- [${hash.slice(0, 7)}](${base}/commit/${hash}) ${subject.replace(/[\\`*_[\]<>]/g, '\\$&')}`).join('\n')}\n\n## 完整差异\n\n${previous ? `[${previous}...${tag}](${base}/compare/${previous}...${tag})` : `[首次发布源码](${base}/tree/${tag})`}\n\n## 安装与限制\n\n未签名构建：Windows NSIS 安装器、macOS .app.tar.gz、Linux Debian 包；架构见附件名称，不提供 macOS Universal 包。\n\n应用不捆绑 Pi 或 Node.js，请先安装运行环境。Windows SmartScreen / macOS Gatekeeper 可能提示或阻止运行；未进行代码签名或 macOS 公证。Linux 包不适用于所有发行版。三平台流水线检查与打包不替代原生交互验收，具体范围见仓库验证文档。\n`;
+  return `# pi-air ${tag}\n\n比较范围：${previous ?? '首次发布'} → ${tag}，共 ${commits.length} 个提交。\n\n${summary.trim()}\n\n## 全部提交\n\n${commits.map(({ hash, subject }) => `- [${hash.slice(0, 7)}](${base}/commit/${hash}) ${subject.replace(/[\\`*_[\]<>]/g, '\\$&')}`).join('\n')}\n\n## 完整差异\n\n${previous ? `[${previous}...${tag}](${base}/compare/${previous}...${tag})` : `[首次发布源码](${base}/tree/${tag})`}\n\n## 安装与限制\n\n未签名构建：Windows NSIS 安装器、macOS .app.tar.gz、Linux Debian 包；架构见附件名称，不提供 macOS Universal 包。\n\n应用不捆绑 Pi 或 Node.js，请先安装运行环境。Windows SmartScreen / macOS Gatekeeper 可能提示或阻止运行；未进行代码签名或 macOS 公证。Linux 包不适用于所有发行版。三平台流水线检查与打包不替代原生交互验收，具体范围见仓库验证文档。\n`;
 }
 
 // 使用参数数组调用 Git，不依赖 Shell，兼容 Windows、macOS 和 Linux。

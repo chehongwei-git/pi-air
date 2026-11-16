@@ -56,7 +56,7 @@ jobs:
         run: node scripts/release-notes.mjs "${{ github.ref_name }}" "${{ github.repository }}" release-notes.md
       - uses: actions/download-artifact@v7
         with:
-          pattern: pi-desktop-*-unsigned
+          pattern: pi-air-*-unsigned
           path: release-assets
           merge-multiple: true
       # 先创建草稿并上传附件，再公开；失败时避免公开不完整的新版本。
@@ -82,7 +82,7 @@ jobs:
             if (release && !release.draft) throw new Error('该版本已发布，请使用新的版本标签');
             if (!release) {
               release = (await github.rest.repos.createRelease({
-                owner, repo, tag_name: tag, name: `Pi Desktop ${tag}`,
+                owner, repo, tag_name: tag, name: `pi-air ${tag}`,
                 draft: true, prerelease: false,
                 body: await fs.readFile('release-notes.md', 'utf8'),
               })).data;
