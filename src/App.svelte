@@ -8,6 +8,7 @@
   import { listen } from '@tauri-apps/api/event';
   import { errorMessage } from './lib/client';
   import type { Message, SidebarSessionEntry } from './lib/types';
+  import ProjectLocationPage from './lib/components/ProjectLocationPage.svelte';
   import ProjectPicker from './lib/components/ProjectPicker.svelte';
   import CommandComposer from './lib/components/CommandComposer.svelte';
   import { pointerReorder } from './lib/pointer-reorder';
@@ -40,6 +41,47 @@
   >();
   const workspace = new Workspace();
   let desktop = $derived(workspace.active);
+  let locationProject = $state<string | null>(null);
+  let locationTrigger: HTMLElement | null = null;
+  function openProjectLocation(path: string, origin: HTMLElement): void {
+    const record = desktop.settings.projects?.find(
+      (p) => desktop.projectKey(p.currentPath) === desktop.projectKey(path),
+    );
+    if (!record) return;
+    leaveSettings(() => {
+      hideSettings();
+      pluginsOpen = false;
+      sidebarCollection = null;
+      locationTrigger = origin;
+      locationProject = record.id;
+      sidebar = window.innerWidth > 900;
+    });
+  }
+  async function closeProjectLocation(): Promise<void> {
+    const project = desktop.settings.projects?.find(
+      (p) => p.id === locationProject,
+    );
+    locationProject = null;
+    await tick();
+    const origin =
+      locationTrigger?.isConnected &&
+      (sidebar || !locationTrigger.closest('.sidebar'))
+        ? locationTrigger
+        : null;
+    const row =
+      sidebar && project
+        ? [
+            ...document.querySelectorAll<HTMLElement>(
+              '[data-sidebar-kind="project"]',
+            ),
+          ].find((node) => node.dataset.sidebarPath === project.currentPath)
+        : null;
+    (
+      origin ??
+      row ??
+      document.querySelector<HTMLElement>('[data-composer-input]')
+    )?.focus({ preventScroll: true });
+  }
   $effect(() => {
     if (workspace.error) {
       desktop.error = workspace.error;
@@ -147,6 +189,7 @@
   let settingsUnsaved = $state(false);
   /** 管理视图切换先经过设置草稿保护，成功导航时再清理页面状态。 */
   function leaveSettings(action: () => void, target = ''): void {
+    if (locationProject) locationProject = null;
     if (settingsVisible && settingsPage)
       settingsPage.requestLeave(action, target);
     else if (pluginsOpen && pluginsPage)
@@ -641,6 +684,7 @@
 
 <svelte:window onkeydown={keydown} onfocus={focus} />
 <SidebarContextMenu
+  onlocate={openProjectLocation}
   {desktop}
   onrename={(kind, path, label, origin) => {
     if (editing) {
@@ -787,7 +831,8 @@
             >
           </div>
           {#if isSectionExpanded('projects', projectsOpen)}
-            {#each visibleProjects as project (desktop.projectKey(project.path))}
+            {#each visibleProjects as project (workspace.projectIdentity(project.path))}
+              {@const location = workspace.projectLocation(project.path)}
               {@const expanded = isSectionExpanded(
                 `project:${project.path}`,
                 desktop.isExpanded(project.path),
@@ -874,6 +919,27 @@
                       title="更多操作"><Icon name="more" size={14} /></button
                     >
                   </div>
+                {/if}
+                {#if location && (location.state !== 'available' || location.message)}
+                  <button
+                    class="text-button project-location-status"
+                    onclick={(event) =>
+                      openProjectLocation(project.path, event.currentTarget)}
+                  >
+                    <Icon
+                      name={location.state === 'available'
+                        ? 'check'
+                        : 'warning'}
+                      size={14}
+                    />
+                    <span
+                      >{location.state === 'relocating'
+                        ? '等待任务结束后更新'
+                        : location.state === 'unavailable'
+                          ? '需要关联目录'
+                          : location.message}</span
+                    >
+                  </button>
                 {/if}
                 {#if expanded}
                   <div class="project-sessions">
@@ -1180,7 +1246,7 @@
       </section>
     {/snippet}
     {#if sidebarCollection !== null || settingsVisible || pluginsOpen}{@render notices()}{/if}
-    {#if pluginsOpen}
+    {#if pluginsOpen && !locationProject}
       <LazyPage
         title="插件管理"
         load={loadPlugins}
@@ -1196,7 +1262,7 @@
         {/snippet}
       </LazyPage>
     {/if}
-    {#if settingsVisible}
+    {#if settingsVisible && !locationProject}
       <LazyPage
         title="应用设置"
         load={loadSettings}
@@ -1212,7 +1278,7 @@
         {/snippet}
       </LazyPage>
     {/if}
-    {#if sidebarCollection && !settingsVisible}
+    {#if sidebarCollection && !settingsVisible && !locationProject}
       <div class="collection-navigation">
         {#if !sidebar}<button
             class="icon-button"
@@ -1229,12 +1295,23 @@
         }}
       />
     {/if}
+    {#if locationProject}
+      <ProjectLocationPage
+        {workspace}
+        projectId={locationProject}
+        onclose={() => void closeProjectLocation()}
+      />
+    {/if}
     <div
       class="conversation-workspace"
-      class:collection-hidden={sidebarCollection !== null ||
+      class:collection-hidden={locationProject !== null ||
+        sidebarCollection !== null ||
         settingsVisible ||
         pluginsOpen}
-      inert={sidebarCollection !== null || settingsVisible || pluginsOpen}
+      inert={locationProject !== null ||
+        sidebarCollection !== null ||
+        settingsVisible ||
+        pluginsOpen}
     >
       <header class="topbar" class:show-feedback={feedbackOpen}>
         <div class="topbar-left">
@@ -1528,7 +1605,8 @@
             {/if}
             {#key desktop}<CommandComposer
                 {desktop}
-                active={!settingsVisible &&
+                active={!locationProject &&
+                  !settingsVisible &&
                   !pluginsOpen &&
                   sidebarCollection === null}
                 onsend={(mode) => {

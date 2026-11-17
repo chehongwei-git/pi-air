@@ -1,5 +1,11 @@
 /** Tauri 端口适配器；业务层可替换此对象，测试不需要桌面窗口或在线模型。 */
-import { Channel, invoke } from '@tauri-apps/api/core';
+import { Channel, invoke, isTauri } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import type {
+  ProjectLocations,
+  DirectoryListing,
+  ProjectMergePreview,
+} from './types';
 import type { ModelSettings, ProviderConfig, Discovery } from './model-config';
 import type {
   Action,
@@ -23,6 +29,39 @@ export interface Connected {
   verified: boolean;
 }
 export const bridge = {
+  /** 目录位置由宿主核验；自动检测与手动关联共用事务入口。 */
+  projectLocations(
+    paths: string[],
+    association?: { id: string; target: string; revision: number },
+  ): Promise<ProjectLocations> {
+    return invoke('refresh_project_locations', { paths, association });
+  },
+  previewProjectMerge(
+    id: string,
+    target: string,
+  ): Promise<ProjectMergePreview> {
+    return invoke('preview_project_merge', { id, target });
+  },
+  mergeProjects(preview: ProjectMergePreview): Promise<ProjectLocations> {
+    return invoke('merge_projects', {
+      request: {
+        id: preview.id,
+        target: preview.target,
+        targetId: preview.targetId,
+        directoryIdentity: preview.directoryIdentity,
+        revision: preview.revision,
+      },
+    });
+  },
+  cancelProjectMerge(id: string, revision: number): Promise<ProjectLocations> {
+    return invoke('cancel_project_merge', { id, revision });
+  },
+  browseDirectories(path: string): Promise<DirectoryListing> {
+    return invoke('browse_project_directories', { path });
+  },
+  async watchProjects(changed: () => void): Promise<() => void> {
+    return isTauri() ? listen('project-locations-changed', changed) : () => {};
+  },
   /** 启动前安装 Channel 回调，Pi 初始化时的扩展交互也不会丢失。 */
   connect(
     project: string,

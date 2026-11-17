@@ -6,8 +6,10 @@
   let {
     desktop,
     onrename,
+    onlocate,
   }: {
     desktop: Desktop;
+    onlocate?: (path: string, origin: HTMLElement) => void;
     onrename: (
       kind: SidebarItem['kind'],
       path: string,
@@ -159,6 +161,15 @@
     style:top={`${position.y}px`}
   >
     <button role="menuitem" onclick={choose}>重命名</button>
+    {#if target.kind === 'project' && onlocate}
+      <button
+        role="menuitem"
+        onclick={() => {
+          close(false);
+          if (target && trigger) onlocate?.(target.path, trigger);
+        }}>项目目录…</button
+      >
+    {/if}
     <button
       role="menuitem"
       onclick={() => {

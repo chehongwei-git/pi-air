@@ -1206,6 +1206,17 @@ export class Desktop {
       );
       return;
     }
+    if (event.type === 'relocating') {
+      // 新物理进程必须使用新正文命名空间；任务标识和当前消息对象仍保留。
+      this.runtimeId = event.nextRuntimeId;
+      this.ack = 0;
+      this.restoring = true;
+      this.connection = 'starting';
+      this.suppressTranscript = true;
+      this.loadedHistoryCount = this.messages.length;
+      this.stats = null;
+      return;
+    }
     if (event.type === 'released') {
       // 进程被借给其他会话时仅撤销租约，保留已加载正文、草稿和阅读位置。
       ++this.generation;
@@ -1227,7 +1238,19 @@ export class Desktop {
       this.structuredDrafts[this.draftKey()] = parts;
       void this.refreshMetadata();
       // 启动后立刻拉取已有事件；后续唤醒仍通过 drain 合并处理。
-      if (!this.restoring) void this.drain(generation);
+      if (this.restoring && this.suppressTranscript) {
+        void (async () => {
+          try {
+            await this.drain(generation);
+            await this.restoreHistory(generation);
+          } catch (error) {
+            this.error = errorMessage(error);
+          } finally {
+            this.suppressTranscript = false;
+            this.finishRestore();
+          }
+        })();
+      } else if (!this.restoring) void this.drain(generation);
       return;
     }
     if (event.type === 'failed') {
@@ -1239,6 +1262,8 @@ export class Desktop {
       this.connection = 'failed';
       this.run = 'idle';
       this.error = errorMessage(event.error);
+      this.suppressTranscript = false;
+      if (this.restoring) this.finishRestore();
       return;
     }
     if (this.restoring && this.connection !== 'starting') {
@@ -1267,6 +1292,7 @@ export class Desktop {
   }
   /** 只有 reducer 与扩展处理成功后才推进 ack；失败可重拉，不静默跳过。 */
   private async pump(generation: number): Promise<void> {
+    const runtime = this.runtimeId;
     try {
       while (generation === this.generation && this.runtimeId) {
         const batch = await this.api.events(this.runtimeId, this.ack);
@@ -1365,7 +1391,11 @@ export class Desktop {
         }
       }
     } catch (error) {
-      if (generation === this.generation && this.connection !== 'failed')
+      if (
+        generation === this.generation &&
+        runtime === this.runtimeId &&
+        this.connection !== 'failed'
+      )
         this.error = errorMessage(error);
     }
   }

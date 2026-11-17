@@ -168,6 +168,148 @@ function summary(path: string, cwd: string): SessionSummary {
   };
 }
 describe('cross-project workspace', () => {
+  it('absorbs duplicate project identities without replacing either draft or the selected reading view', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const source = workspace.active;
+    const oldRecord = {
+      id: 'old-id',
+      currentPath: '/old',
+      historicalPaths: [],
+      directoryIdentity: 'native:1',
+      sessions: ['/old.jsonl'],
+    };
+    const targetRecord = {
+      ...oldRecord,
+      id: 'target-id',
+      currentPath: '/new',
+      sessions: ['/new.jsonl'],
+    };
+    source.settings = {
+      ...source.settings,
+      projects: [oldRecord, targetRecord],
+      projectRevision: 1,
+    };
+    source.project = '/old';
+    source.draft = '旧项目独立草稿';
+    source.expandedProjects = ['/old', '/new'];
+    workspace.newDraft('/new');
+    const target = workspace.active;
+    target.draft = '新项目独立草稿';
+    target.scrollState = { top: 375, follow: false };
+    const messages = target.messages;
+    const anchor = target.scrollState;
+    api.projectLocations = vi.fn<Bridge['projectLocations']>(async () => ({
+      settings: {
+        ...source.settings,
+        projectRevision: 2,
+        projectOrder: ['/new'],
+        projects: [
+          {
+            ...oldRecord,
+            currentPath: '/new',
+            historicalPaths: ['/old'],
+            mergedIds: ['target-id'],
+            sessions: ['/old.jsonl', '/new.jsonl'],
+          },
+        ],
+      },
+      locations: [
+        {
+          id: 'old-id',
+          currentPath: '/new',
+          state: 'available',
+          candidate: null,
+          message: '',
+        },
+      ],
+    }));
+    const explicitMerge = vi.spyOn(api, 'mergeProjects');
+    await workspace.refreshProjectLocations();
+    expect(workspace.active).toBe(target);
+    expect(source.project).toBe('/new');
+    expect(target.project).toBe('/new');
+    expect(source.draft).toBe('旧项目独立草稿');
+    expect(target.draft).toBe('新项目独立草稿');
+    expect(target.messages).toBe(messages);
+    expect(target.scrollState).toBe(anchor);
+    expect(target.scrollState.top).toBe(375);
+    expect(source.expandedProjects).toEqual(['/new']);
+    expect(workspace.projectIdentity('/new')).toBe('old-id');
+    expect(explicitMerge).not.toHaveBeenCalled();
+  });
+  it('updates shared project paths without replacing session content, drafts or reading anchors', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const session = workspace.active;
+    const record = {
+      id: 'project-1',
+      currentPath: '/old',
+      historicalPaths: [],
+      directoryIdentity: 'test:1',
+      sessions: ['/history.jsonl'],
+    };
+    session.settings = {
+      ...session.settings,
+      projects: [record],
+      projectRevision: 1,
+      projectOrder: ['/old'],
+      sidebarItems: [{ kind: 'project', path: '/old', name: '我的别名' }],
+    };
+    session.project = '/old';
+    session.draft = '未发送的草稿';
+    session.scrollState = { top: 456, follow: false };
+    session.expandedProjects = ['/old'];
+    session.sessions = [summary('/history.jsonl', '/old')];
+    const messages = session.messages;
+    const anchor = session.scrollState;
+    api.projectLocations = vi.fn<Bridge['projectLocations']>(async () => ({
+      settings: {
+        ...session.settings,
+        projectRevision: 2,
+        projects: [
+          { ...record, currentPath: '/new', historicalPaths: ['/old'] },
+        ],
+        projectOrder: ['/new'],
+        sidebarItems: [{ kind: 'project', path: '/new', name: '我的别名' }],
+      },
+      locations: [
+        {
+          id: record.id,
+          currentPath: '/new',
+          state: 'available',
+          candidate: null,
+          message: '项目目录已更新',
+        },
+      ],
+    }));
+    await workspace.refreshProjectLocations();
+    expect(workspace.active).toBe(session);
+    expect(session.messages).toBe(messages);
+    expect(session.scrollState).toBe(anchor);
+    expect(session.scrollState.top).toBe(456);
+    expect(session.draft).toBe('未发送的草稿');
+    expect(session.project).toBe('/new');
+    expect(session.expandedProjects).toEqual(['/new']);
+    expect(session.sessions[0].cwd).toBe('/new');
+    expect(session.projectName('/new')).toBe('我的别名');
+    expect(workspace.projectIdentity('/new')).toBe(record.id);
+  });
+  it('keeps existing paths and drafts when directory association fails', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const session = workspace.active;
+    session.project = '/old';
+    session.draft = '保留输入';
+    api.projectLocations = vi.fn(async () => {
+      throw new Error('保存失败');
+    });
+    await expect(
+      workspace.associateProject('project-1', '/new', 1),
+    ).rejects.toThrow('保存失败');
+    expect(session.project).toBe('/old');
+    expect(session.draft).toBe('保留输入');
+  });
   it('shares a late startup catalog with a new local draft without connecting or sending', async () => {
     const { workspace, api } = fixture();
     await workspace.init();

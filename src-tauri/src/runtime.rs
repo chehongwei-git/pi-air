@@ -175,6 +175,15 @@ impl Handle {
             .map_err(|_| AppError::new("DISCONNECTED", "Pi 已退出"))?
     }
     /// 内部命令必须先确认注册，避免缺失时被当作提示词发给模型。
+    /// 目录迁移通过 Pi 的 cwdOverride 恢复原文件，禁止桌面改写 JSONL。
+    pub async fn open_relocated(&self, path: &str, project: &str) -> Result<Value> {
+        self.bridge(
+            "pi-desktop-relocate-v1",
+            json!({"path":path,"cwd":project}),
+            Kind::BridgeRefresh,
+        )
+        .await
+    }
     async fn bridge(&self, name: &str, args: Value, kind: Kind) -> Result<Value> {
         let state = self.rpc(json!({"type":"get_state"}), Kind::Query).await?;
         // 仅模型与强度切换允许在运行中执行；重载和导航仍须空闲。

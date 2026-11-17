@@ -127,6 +127,7 @@ for await (const line of readline.createInterface({
     case 'get_commands':
       reply(request, {
         commands: [
+          { name: 'pi-desktop-relocate-v1', source: 'extension' },
           { name: 'pi-desktop-reload-v1', source: 'extension' },
           { name: 'pi-desktop-models-v1', source: 'extension' },
           { name: 'pi-desktop-model-v1', source: 'extension' },
@@ -196,6 +197,14 @@ for await (const line of readline.createInterface({
       if ('textParts' in request || '_textParts' in request)
         throw new Error('desktop presentation leaked into Pi RPC');
       if (request.message.startsWith('/pi-desktop-')) {
+        if (request.message.startsWith('/pi-desktop-relocate-v1 ')) {
+          const input = JSON.parse(
+            request.message.slice(request.message.indexOf(' ') + 1),
+          );
+          sessionFile = input.path;
+          cwd = input.cwd;
+          switchCount++;
+        }
         if (request.message.startsWith('/pi-desktop-model-v1 ')) {
           const selection = JSON.parse(
             request.message.slice(request.message.indexOf(' ') + 1),

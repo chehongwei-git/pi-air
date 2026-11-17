@@ -1,6 +1,13 @@
 /** 真实 Pi 进程池协议验证：临时项目/配置，无模型请求；传入 Pi 的 CLI JS 入口。 */
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  readFile,
+  rename,
+  rm,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { createInterface } from 'node:readline';
@@ -112,6 +119,35 @@ try {
     assert.equal(child.pid, pid);
     switches.push(Math.round(performance.now() - before));
   }
+  // 切换离开 B 后重命名其目录，再经桥接恢复原会话，确认真正的工具 cwd。
+  const moved = join(root, '项目 B 已改名');
+  const originalHeader = (await readFile(sessions[1], 'utf8')).split('\n')[0];
+  await rename(b, moved);
+  const relocated = await request('prompt', {
+    message: `/pi-desktop-relocate-v1 ${JSON.stringify({ path: sessions[1], cwd: moved })}`,
+  });
+  assert.equal(relocated.disposition, 'handled');
+  const relocatedState = await request('get_state');
+  assert.equal(relocatedState.sessionFile, sessions[1]);
+  assert.equal(
+    (await request('bash', { command: 'node -p "process.cwd()"' })).output
+      .trim()
+      .toLowerCase(),
+    resolve(moved).toLowerCase(),
+  );
+  assert.equal(
+    (
+      await request('bash', {
+        command: "node -p \"require('fs').readFileSync('marker.txt','utf8')\"",
+      })
+    ).output.trim(),
+    '1',
+  );
+  await request('set_session_name', { name: '目录改名后继续' });
+  const resumed = await readFile(sessions[1], 'utf8');
+  assert.equal(resumed.split('\n')[0], originalHeader);
+  assert(resumed.includes('目录改名后继续'));
+  await request('switch_session', { sessionPath: sessions[0] });
   assert.equal((await request('new_session')).cancelled, false);
   const result = await request('bash', {
     command: "node -p \"require('fs').readFileSync('marker.txt','utf8')\"",
@@ -125,6 +161,8 @@ try {
       crossProjectRelativePaths: true,
       bridgeReloaded: true,
       newSessionKeepsProject: true,
+      relocatedSessionKeepsFileAndHistory: true,
+      relocatedToolsUseNewDirectory: true,
     }),
   );
 } finally {

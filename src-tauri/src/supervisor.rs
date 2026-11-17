@@ -19,6 +19,7 @@ pub struct Activity {
 /// 新草稿在队列中只持有启动快照和受控 Channel，不拥有操作系统进程。
 pub struct Launch {
     pub settings: Settings,
+    pub session_path: Option<String>,
     pub project: String,
     pub channel: tauri::ipc::Channel<Value>,
     pub model: Option<(String, String)>,
@@ -50,10 +51,14 @@ struct Inner {
     submissions: HashMap<String, String>,
     stopping: HashSet<String>,
     launching: HashSet<String>,
+    launching_projects: HashMap<String, String>,
     queue: VecDeque<Job>,
     serial: u64,
     limit: usize,
     closing: bool,
+    blocked_projects: HashSet<String>,
+    // 记录进程启动时的路径拼写等价关系，目录消失后仍能找到原运行实例。
+    project_aliases: HashMap<String, String>,
 }
 #[derive(Default)]
 pub struct Supervisor {
@@ -75,8 +80,16 @@ impl Supervisor {
     fn project_key(project: &str) -> String {
         crate::session_identity(project).unwrap_or_else(|_| project.into())
     }
+    fn known_project_key(inner: &Inner, project: &str) -> String {
+        inner
+            .project_aliases
+            .get(&crate::projects::key(project))
+            .cloned()
+            .unwrap_or_else(|| Self::project_key(project))
+    }
     fn available(inner: &Inner, id: &str, entry: &PoolEntry) -> bool {
         entry.eligible
+            && !inner.blocked_projects.contains(&entry.project)
             && !entry.reserved
             && inner.selected != id
             && !inner
@@ -194,12 +207,28 @@ impl Supervisor {
         // 通道关闭代表本次获取结束；只让重访被借用租约的导航等待。
         let (_completion, completion) = tokio::sync::watch::channel(());
         let project_key = Self::project_key(project);
+        let aliases: Vec<_> = settings
+            .projects
+            .iter()
+            .filter(|p| Self::project_key(&p.current_path) == project_key)
+            .map(|p| crate::projects::key(&p.current_path))
+            .chain(std::iter::once(crate::projects::key(project)))
+            .collect();
         let config = Self::config_key(settings);
         let target_id = id.unwrap_or_else(|| format!("lease-{}", uuid::Uuid::new_v4()));
         let mut previous = {
             let mut inner = self.inner.lock().unwrap();
+            for alias in aliases {
+                inner.project_aliases.insert(alias, project_key.clone());
+            }
             if inner.closing {
                 return Err(AppError::new("CLOSING", "应用正在退出"));
+            }
+            if inner.blocked_projects.contains(&project_key) {
+                return Err(AppError::new(
+                    "PROJECT_UNAVAILABLE",
+                    "项目目录正在等待重新关联",
+                ));
             }
             let count = inner
                 .pool
@@ -297,9 +326,20 @@ impl Supervisor {
         self.register(handle.clone());
         let init = tokio::time::timeout(std::time::Duration::from_secs(30), async {
             let switched = if let Some(path) = path {
-                handle
-                    .action(Action::SwitchSession { path: path.into() })
-                    .await?
+                let original = crate::history::session_cwd(path).ok();
+                if original.as_ref().is_some_and(|cwd| {
+                    !crate::history::same_project(cwd, project)
+                        && crate::history::same_project(
+                            crate::projects::session_project(settings, path, cwd),
+                            project,
+                        )
+                }) {
+                    handle.open_relocated(path, project).await?
+                } else {
+                    handle
+                        .action(Action::SwitchSession { path: path.into() })
+                        .await?
+                }
             } else if reused {
                 handle.action(Action::NewSession).await?
             } else {
@@ -589,6 +629,195 @@ impl Supervisor {
         self.dispatch();
         Ok(())
     }
+    /// 检测到目录异常立即冻结该项目，阻止任务结算后抢先启动下一条。
+    pub fn block_project(&self, project: &str, blocked: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        let key = Self::known_project_key(&inner, project);
+        if blocked {
+            inner.blocked_projects.insert(key);
+        } else {
+            inner.blocked_projects.remove(&key);
+        }
+    }
+    /// 迁移后尚未启动的历史也继续独占文件写入权，供宿主更新会话绑定。
+    pub fn queued_session_bindings(&self) -> Vec<(String, String)> {
+        self.inner
+            .lock()
+            .unwrap()
+            .queue
+            .iter()
+            .filter_map(|job| {
+                Some((
+                    job.launch.as_ref()?.session_path.clone()?,
+                    job.runtime.clone(),
+                ))
+            })
+            .collect()
+    }
+    /// 以仍属于该项目的运行实例补齐历史归属；外部改名后不依赖已失效的 header.cwd。
+    pub async fn project_sessions(&self, project: &str) -> Result<Vec<String>> {
+        let handles: Vec<_> = {
+            let inner = self.inner.lock().unwrap();
+            let key = Self::known_project_key(&inner, project);
+            inner
+                .pool
+                .iter()
+                .filter(|(_, p)| p.project == key)
+                .filter_map(|(id, _)| inner.handles.get(id).cloned())
+                .collect()
+        };
+        let mut paths = Vec::new();
+        for handle in handles {
+            let state = handle.action(Action::State).await?;
+            if let Some(path) = state["sessionFile"].as_str().filter(|s| !s.is_empty()) {
+                paths.push(path.to_owned());
+            }
+        }
+        Ok(paths)
+    }
+    /// 所有工具和初始化完成后才退休旧进程；排队任务保留身份并改为新目录启动。
+    /// 项目已冻结后核验退休条件；先持久化不可取消阶段，再执行进程操作。
+    pub fn can_relocate_project(&self, project: &str) -> bool {
+        let inner = self.inner.lock().unwrap();
+        let key = Self::known_project_key(&inner, project);
+        !inner.launching_projects.values().any(|p| *p == key)
+            && !inner.pool.iter().any(|(id, p)| {
+                p.project == key
+                    && (inner.launching.contains(id)
+                        || p.reserved
+                        || inner
+                            .tasks
+                            .values()
+                            .any(|t| t.runtime_id == *id && t.state == "running")
+                        || inner.handles.get(id).is_some_and(|h| {
+                            !matches!(
+                                h.lifecycle.borrow().state,
+                                runtime::Lifecycle::Idle | runtime::Lifecycle::Stopped
+                            )
+                        }))
+            })
+    }
+    pub async fn relocate_project(
+        &self,
+        old: &str,
+        new: &str,
+        settings: &Settings,
+    ) -> Result<bool> {
+        let key = Self::known_project_key(&self.inner.lock().unwrap(), old);
+        let handles = {
+            let inner = self.inner.lock().unwrap();
+            if inner
+                .launching_projects
+                .values()
+                .any(|project| *project == key)
+            {
+                return Ok(false);
+            }
+            let ids: Vec<_> = inner
+                .pool
+                .iter()
+                .filter(|(_, p)| p.project == key)
+                .map(|(id, _)| id.clone())
+                .collect();
+            if ids.iter().any(|id| {
+                inner.launching.contains(id)
+                    || inner.pool.get(id).is_some_and(|p| p.reserved)
+                    || inner
+                        .tasks
+                        .values()
+                        .any(|t| t.runtime_id == *id && t.state == "running")
+                    || inner.handles.get(id).is_some_and(|h| {
+                        h.lifecycle.borrow().state != runtime::Lifecycle::Idle
+                            && h.lifecycle.borrow().state != runtime::Lifecycle::Stopped
+                    })
+            }) {
+                return Ok(false);
+            }
+            ids.iter()
+                .filter_map(|id| inner.handles.get(id).cloned())
+                .collect::<Vec<_>>()
+        };
+        for handle in handles {
+            let queued = self.is_queued(&handle.id);
+            let snapshot = if queued {
+                Some(handle.action(Action::State).await?)
+            } else {
+                None
+            };
+            handle.close(false).await?;
+            let next_runtime = format!("relocated-{}", uuid::Uuid::new_v4());
+            {
+                let mut inner = self.inner.lock().unwrap();
+                for task in inner
+                    .tasks
+                    .values_mut()
+                    .filter(|task| task.runtime_id == handle.id && task.state == "queued")
+                {
+                    task.runtime_id = next_runtime.clone();
+                }
+                for job in inner
+                    .queue
+                    .iter_mut()
+                    .filter(|job| job.runtime == handle.id)
+                {
+                    job.runtime = next_runtime.clone();
+                    job.launch = Some(Launch {
+                        settings: settings.clone(),
+                        project: new.into(),
+                        channel: handle.channel.clone(),
+                        session_path: snapshot
+                            .as_ref()
+                            .and_then(|s| s["sessionFile"].as_str())
+                            .map(str::to_owned),
+                        // 排队中的现有会话保留模型快照，不能被合并后的项目默认值覆盖。
+                        model: snapshot.as_ref().and_then(|s| {
+                            Some((
+                                s["model"]["provider"].as_str()?.to_owned(),
+                                s["model"]["id"].as_str()?.to_owned(),
+                            ))
+                        }),
+                        thinking: snapshot
+                            .as_ref()
+                            .and_then(|s| s["thinkingLevel"].as_str())
+                            .map(str::to_owned),
+                    });
+                }
+                inner.handles.remove(&handle.id);
+                inner.pool.remove(&handle.id);
+            }
+            if queued {
+                let _ = handle.channel.send(json!({"type":"relocating", "runtimeId":handle.id, "nextRuntimeId":next_runtime}));
+            } else {
+                handle.notify_released();
+            }
+        }
+        let mut inner = self.inner.lock().unwrap();
+        let aliases = &inner.project_aliases;
+        let queued_projects: HashSet<_> = inner
+            .queue
+            .iter()
+            .filter_map(|job| job.launch.as_ref())
+            .filter(|launch| {
+                aliases
+                    .get(&crate::projects::key(&launch.project))
+                    .cloned()
+                    .unwrap_or_else(|| Self::project_key(&launch.project))
+                    == key
+            })
+            .map(|launch| launch.project.clone())
+            .collect();
+        for job in &mut inner.queue {
+            if let Some(launch) = &mut job.launch {
+                if queued_projects.contains(&launch.project) {
+                    launch.project = new.into();
+                    launch.settings = settings.clone();
+                }
+            }
+        }
+        // 新路径也先冻结；配置原子落盘成功后统一解冻。
+        inner.blocked_projects.insert(Self::project_key(new));
+        Ok(true)
+    }
     pub fn pause(&self, closing: bool) {
         self.inner.lock().unwrap().closing = closing;
     }
@@ -641,7 +870,7 @@ impl Supervisor {
             .acquire(
                 &launch.settings,
                 &launch.project,
-                None,
+                launch.session_path.as_deref(),
                 launch.channel.clone(),
                 Some(runtime.into()),
                 cross_project,
@@ -700,13 +929,26 @@ impl Supervisor {
                 if inner.closing || active >= inner.limit.max(1) {
                     return;
                 }
-                let Some(job) = inner.queue.pop_front() else {
+                // 跳过目录正在迁移的项目，其他项目不受其队首阻塞。
+                let next = inner.queue.iter().position(|job| {
+                    let project = job
+                        .launch
+                        .as_ref()
+                        .map(|l| Self::known_project_key(&inner, &l.project))
+                        .or_else(|| inner.pool.get(&job.runtime).map(|p| p.project.clone()));
+                    !project.is_some_and(|p| inner.blocked_projects.contains(&p))
+                });
+                let Some(job) = next.and_then(|index| inner.queue.remove(index)) else {
                     return;
                 };
                 let handle = inner.handles.get(&job.runtime).cloned();
                 inner.tasks.get_mut(&job.id).unwrap().state = "running".into();
-                if job.launch.is_some() {
+                if let Some(launch) = &job.launch {
                     inner.launching.insert(job.runtime.clone());
+                    let project_key = Self::known_project_key(&inner, &launch.project);
+                    inner
+                        .launching_projects
+                        .insert(job.runtime.clone(), project_key);
                 }
                 (job, handle)
             };
@@ -715,7 +957,11 @@ impl Supervisor {
                 let (job, handle) = work;
                 let result = if let Some(launch) = job.launch {
                     let launched = owner.launch(&job.runtime, launch).await;
-                    owner.inner.lock().unwrap().launching.remove(&job.runtime);
+                    {
+                        let mut inner = owner.inner.lock().unwrap();
+                        inner.launching.remove(&job.runtime);
+                        inner.launching_projects.remove(&job.runtime);
+                    }
                     match launched {
                         Ok(handle) => {
                             if owner.inner.lock().unwrap().closing {
@@ -832,8 +1078,302 @@ mod tests {
             ..Settings::default()
         }
     }
+    fn prompt() -> Action {
+        Action::Prompt {
+            message: "test".into(),
+            images: vec![],
+            mode: None,
+            text_parts: None,
+        }
+    }
     fn channel() -> tauri::ipc::Channel<Value> {
         tauri::ipc::Channel::new(|_| Ok(()))
+    }
+
+    #[tokio::test]
+    async fn lost_directory_keeps_the_original_runtime_key_until_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        let mut settings = pool_settings();
+        crate::projects::register(&mut settings, &[old.to_string_lossy().into()]);
+        let owner = Arc::new(Supervisor::default());
+        let (handle, _, _) = owner
+            .acquire(
+                &settings,
+                root.path().to_str().unwrap(),
+                None,
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        // Windows 不允许重命名子进程当前目录；进程置于父目录，保留改名前的池登记，
+        // 跨平台复现路径已失效而原进程仍存在的调度状态，并实际验证进程退休。
+        {
+            let mut inner = owner.inner.lock().unwrap();
+            let key = Supervisor::project_key(old.to_str().unwrap());
+            inner.pool.get_mut(&handle.id).unwrap().project = key.clone();
+            inner
+                .project_aliases
+                .insert(crate::projects::key(old.to_str().unwrap()), key);
+        }
+        let registered = owner.inner.lock().unwrap().pool[&handle.id].project.clone();
+        let original_state = handle.action(Action::State).await.unwrap();
+        std::fs::rename(&old, &new).unwrap();
+        let owned = owner.project_sessions(old.to_str().unwrap()).await.unwrap();
+        assert_eq!(
+            owned,
+            vec![original_state["sessionFile"].as_str().unwrap().to_owned()]
+        );
+        owner.block_project(old.to_str().unwrap(), true);
+        assert!(owner
+            .inner
+            .lock()
+            .unwrap()
+            .blocked_projects
+            .contains(&registered));
+        assert!(owner
+            .relocate_project(old.to_str().unwrap(), new.to_str().unwrap(), &settings)
+            .await
+            .unwrap());
+        assert!(owner.handle(&handle.id).is_err());
+        assert!(handle.action(Action::State).await.is_err());
+        owner.close_all(true).await.unwrap();
+    }
+
+    /// 迁移项目不占执行名额；队列改址后仍使用同一个任务及运行时标识。
+    #[tokio::test]
+    async fn project_relocation_preserves_queued_identity_and_does_not_block_other_projects() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        let other = root.path().join("other");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let owner = Arc::new(Supervisor::default());
+        let settings = pool_settings();
+        owner.block_project(old.to_str().unwrap(), true);
+        let launch = |project: &std::path::Path| Launch {
+            settings: settings.clone(),
+            project: project.to_string_lossy().into(),
+            session_path: None,
+            channel: channel(),
+            model: None,
+            thinking: None,
+        };
+        let queued = owner
+            .submit_new("moving".into(), prompt(), launch(&old))
+            .unwrap();
+        let runtime = queued["runtimeId"].as_str().unwrap();
+        assert!(owner.is_queued(runtime));
+        assert!(owner.handle(runtime).is_err());
+        let other_task = owner
+            .submit_new("unrelated".into(), prompt(), launch(&other))
+            .unwrap();
+        let other_runtime = other_task["runtimeId"].as_str().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while owner.submission("unrelated").unwrap().state != "completed" {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(owner.handle(other_runtime).is_ok());
+        assert!(owner.is_queued(runtime));
+        assert!(owner
+            .relocate_project(old.to_str().unwrap(), new.to_str().unwrap(), &settings)
+            .await
+            .unwrap());
+        owner.block_project(old.to_str().unwrap(), false);
+        owner.block_project(new.to_str().unwrap(), false);
+        owner.set_limit(4);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while owner.submission("moving").unwrap().state != "completed" {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let task = owner.submission("moving").unwrap();
+        assert_eq!(task.runtime_id, runtime);
+        assert_eq!(task.task_id, queued["desktopTask"].as_str().unwrap());
+        let snapshot = owner
+            .handle(runtime)
+            .unwrap()
+            .action(Action::State)
+            .await
+            .unwrap();
+        assert!(crate::history::same_project(
+            snapshot["cwd"].as_str().unwrap(),
+            new.to_str().unwrap()
+        ));
+        owner.close_all(true).await.unwrap();
+    }
+
+    /// 正在执行的工具链不被迁移终止；已有会话的排队任务重启后仍恢复原文件。
+    #[tokio::test]
+    async fn relocation_waits_for_running_tasks_and_restarts_queued_history() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old");
+        let new = root.path().join("new");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::create_dir(&new).unwrap();
+        let file = root.path().join("history.jsonl");
+        std::fs::write(
+            &file,
+            serde_json::json!({"type":"session", "cwd":old}).to_string(),
+        )
+        .unwrap();
+        let mut settings = pool_settings();
+        crate::projects::register(
+            &mut settings,
+            &[old.to_string_lossy().into(), new.to_string_lossy().into()],
+        );
+        let project_id = settings.projects[0].id.clone();
+        settings.projects[0]
+            .sessions
+            .push(file.to_string_lossy().into());
+        let owner = Arc::new(Supervisor::default());
+        owner.set_limit(2);
+        let (running, _, _) = owner
+            .acquire(
+                &settings,
+                old.to_str().unwrap(),
+                None,
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        let (queued, _, _) = owner
+            .acquire(
+                &settings,
+                old.to_str().unwrap(),
+                Some(file.to_str().unwrap()),
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        owner
+            .submit(
+                running.id.clone(),
+                "active".into(),
+                Action::Prompt {
+                    message: "hold:work".into(),
+                    images: vec![],
+                    text_parts: None,
+                    mode: None,
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while running.lifecycle.borrow().state != runtime::Lifecycle::Busy {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (target, _, _) = owner
+            .acquire(
+                &settings,
+                new.to_str().unwrap(),
+                None,
+                channel(),
+                None,
+                false,
+            )
+            .await
+            .unwrap();
+        owner
+            .submit(
+                target.id.clone(),
+                "target-active".into(),
+                Action::Prompt {
+                    message: "hold:target".into(),
+                    images: vec![],
+                    text_parts: None,
+                    mode: None,
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while target.lifecycle.borrow().state != runtime::Lifecycle::Busy {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        owner.block_project(old.to_str().unwrap(), true);
+        assert!(!owner.can_relocate_project(old.to_str().unwrap()));
+        let task = owner
+            .submit(queued.id.clone(), "pending".into(), prompt())
+            .unwrap();
+        let preview =
+            crate::project_merge::preview(&settings, &project_id, new.to_str().unwrap()).unwrap();
+        assert!(!preview.automatic);
+        crate::project_merge::apply(&mut settings, &preview, &[]).unwrap();
+        assert!(!owner
+            .relocate_project(old.to_str().unwrap(), new.to_str().unwrap(), &settings)
+            .await
+            .unwrap());
+        assert!(owner.is_running(&running.id));
+        assert!(owner.is_queued(&queued.id));
+        running.action(Action::Stop).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while owner.is_running(&running.id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(owner
+            .relocate_project(old.to_str().unwrap(), new.to_str().unwrap(), &settings)
+            .await
+            .unwrap());
+        let pending = owner.submission("pending").unwrap();
+        assert!(owner
+            .queued_session_bindings()
+            .iter()
+            .any(|(path, id)| path == file.to_str().unwrap() && id == &pending.runtime_id));
+        assert!(owner.is_running(&target.id));
+        assert!(target.action(Action::State).await.is_ok());
+        assert!(target.lifecycle.borrow().state == runtime::Lifecycle::Busy);
+        assert_ne!(pending.runtime_id, queued.id);
+        assert_eq!(pending.task_id, task["desktopTask"].as_str().unwrap());
+        owner.block_project(old.to_str().unwrap(), false);
+        owner.block_project(new.to_str().unwrap(), false);
+        owner.set_limit(4);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while matches!(
+                owner.submission("pending").unwrap().state.as_str(),
+                "queued" | "running"
+            ) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let finished = owner.submission("pending").unwrap();
+        assert_eq!(finished.state, "completed", "{:?}", finished.error);
+        let snapshot = owner
+            .handle(&pending.runtime_id)
+            .unwrap()
+            .action(Action::State)
+            .await
+            .unwrap();
+        assert!(crate::history::same_project(
+            snapshot["cwd"].as_str().unwrap(),
+            new.to_str().unwrap()
+        ));
+        assert_eq!(snapshot["sessionFile"], file.to_str().unwrap());
+        owner.close_all(true).await.unwrap();
     }
 
     /// 新建不受未满额度影响；旧句柄即使已克隆也不能跨租约读取、发送或关闭。
@@ -1229,6 +1769,7 @@ mod tests {
             .submit(handle.id.clone(), "first".into(), prompt())
             .unwrap();
         let launch = || Launch {
+            session_path: None,
             settings: settings.clone(),
             project: project.path().to_string_lossy().into(),
             channel: tauri::ipc::Channel::new(|_| Ok(())),

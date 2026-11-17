@@ -1,0 +1,15 @@
+{
+  "id": "project-1",
+  "currentPath": "/work/renamed",
+  "historicalPaths": ["/work/original"],
+  "directoryIdentity": "unix:1:42",
+  "pendingPath": "/work/target",
+  "sessions": ["/history/session.jsonl"],
+  "mergedIds": ["absorbed-project"],
+  "pendingMerge": {
+    "targetId": "target-project",
+    "directoryIdentity": "unix:1:42",
+    "automatic": true,
+    "retiring": false
+  }
+}

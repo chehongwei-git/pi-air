@@ -10,6 +10,13 @@ mod model_discovery;
 mod new_session;
 mod npm_registry;
 mod platform;
+mod project_commands;
+mod project_merge;
+mod projects;
+use project_commands::{
+    browse_project_directories, cancel_project_merge, merge_projects, preview_project_merge,
+    refresh_project_locations,
+};
 mod plugin_commands;
 mod plugins;
 mod rpc;
@@ -42,6 +49,8 @@ struct AppState {
     drops: Mutex<file_import::Drops>,
     file_reads: AsyncMutex<()>,
     plugin_operations: AsyncMutex<()>,
+    project_operations: AsyncMutex<()>,
+    project_watch: Mutex<Option<projects::ProjectWatch>>,
 }
 impl AppState {
     /// 克隆句柄后立即释放锁，让响应和停止可并发进入 actor。
@@ -57,6 +66,17 @@ impl AppState {
     }
 }
 
+/// 任务启动前的最后检查，避免监听尚未送达时使用失效路径。
+fn ensure_project_available(settings: &Settings, project: &str) -> Result<()> {
+    if let Some(record) = projects::record(settings, project) {
+        let location = projects::inspect(record);
+        if location.state != "available" {
+            return Err(AppError::new("PROJECT_UNAVAILABLE", location.message));
+        }
+    }
+    Ok(())
+}
+
 /// 返回应用配置，不隐式启动 Pi。
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
@@ -64,12 +84,21 @@ fn get_settings(state: State<'_, AppState>) -> Result<Settings> {
 }
 /// 保存设置后下次连接生效；当前 Agent 环境不被运行中修改。
 #[tauri::command]
-fn save_settings(state: State<'_, AppState>, settings: Settings) -> Result<()> {
-    settings::save(&state.config_dir, &settings)?;
-    *state
+fn save_settings(state: State<'_, AppState>, mut settings: Settings) -> Result<()> {
+    let mut stored = state
         .settings
         .lock()
-        .map_err(|_| AppError::new("LOCK", "配置锁异常"))? = settings.clone();
+        .map_err(|_| AppError::new("LOCK", "配置锁异常"))?;
+    if settings.project_revision != stored.project_revision {
+        return Err(AppError::new(
+            "PROJECT_REVISION",
+            "项目目录已更新，请重新读取设置后保存",
+        ));
+    }
+    // 项目注册表只能经专用迁移接口修改，旧设置表单不能抹掉目录关联。
+    settings.projects = stored.projects.clone();
+    settings::save(&state.config_dir, &settings)?;
+    *stored = settings.clone();
     state
         .runtimes
         .set_limit(settings.max_concurrent_tasks as usize);
@@ -114,11 +143,14 @@ async fn connect_pi(
     };
     let _gate = state.lifecycle.lock().await;
     let settings = state.config()?;
+    ensure_project_available(&settings, &project)?;
     if let Some(path) = session_path.clone() {
         let cwd = tokio::task::spawn_blocking(move || history::session_cwd(&path))
             .await
             .map_err(|_| AppError::new("SESSION_HEADER", "读取会话头失败"))??;
-        if session_identity(&cwd)? != session_identity(&project)? {
+        let effective =
+            projects::session_project(&settings, session_path.as_deref().unwrap(), &cwd);
+        if session_identity(effective)? != session_identity(&project)? {
             return Err(AppError::new(
                 "PROJECT_MISMATCH",
                 "历史会话不属于所选项目，请刷新侧栏",
@@ -130,10 +162,11 @@ async fn connect_pi(
         let key = session_identity(path)?;
         let existing = state.sessions.lock().unwrap().get(&key).cloned();
         if let Some(id) = existing {
-            if state
-                .runtimes
-                .handle(&id)
-                .is_ok_and(|handle| handle.lifecycle.borrow().state != runtime::Lifecycle::Stopped)
+            if state.runtimes.is_queued(&id)
+                || state.runtimes.is_running(&id)
+                || state.runtimes.handle(&id).is_ok_and(|handle| {
+                    handle.lifecycle.borrow().state != runtime::Lifecycle::Stopped
+                })
             {
                 return Err(AppError::new("SESSION_OPEN", "该会话已在本窗口中打开"));
             }
@@ -242,10 +275,12 @@ async fn submit_new_task(
     if !std::path::Path::new(&project).is_dir() {
         return Err(AppError::new("PROJECT", "项目目录不存在"));
     }
+    ensure_project_available(&state.config()?, &project)?;
     state.runtimes.submit_new(
         submission_id,
         action,
         supervisor::Launch {
+            session_path: None,
             settings: state.config()?,
             project,
             channel,
@@ -466,7 +501,21 @@ async fn list_sessions(
             .catalog
             .lock()
             .map_err(|_| AppError::new("LOCK", "历史索引锁异常"))?;
-        catalog.list(&settings, &project, &search)
+        let mut summaries = catalog.list(&settings, "", "")?;
+        let owners = projects::session_owners(&settings);
+        for summary in &mut summaries {
+            if let Some(project) = owners.get(&projects::key(&summary.path)) {
+                summary.cwd = project.clone();
+            }
+        }
+        summaries.retain(|s| {
+            (project.is_empty() || history::same_project(&s.cwd, &project))
+                && (search.is_empty()
+                    || format!("{} {} {}", s.name, s.preview, s.cwd)
+                        .to_lowercase()
+                        .contains(&search.to_lowercase()))
+        });
+        Ok(summaries)
     })
     .await
     .map_err(|_| AppError::new("HISTORY", "历史扫描任务异常"))?
@@ -702,6 +751,8 @@ pub fn run() {
                 lifecycle: AsyncMutex::new(()),
                 drops: Mutex::new(file_import::Drops::default()),
                 file_reads: AsyncMutex::new(()),
+                project_operations: AsyncMutex::new(()),
+                project_watch: Mutex::new(None),
                 plugin_operations: AsyncMutex::new(()),
             });
             let state = app.state::<AppState>();
@@ -712,6 +763,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
+            refresh_project_locations,
+            preview_project_merge,
+            merge_projects,
+            cancel_project_merge,
+            browse_project_directories,
             plugin_catalog,
             npm_search,
             npm_detail,

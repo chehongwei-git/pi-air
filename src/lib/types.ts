@@ -12,6 +12,56 @@ export interface ProjectModelPreference {
   model: string;
   thinkingLevel: string;
 }
+/** 项目身份独立于目录名称；历史路径仅用于恢复已有桌面草稿。 */
+export interface ProjectRecord {
+  id: string;
+  currentPath: string;
+  historicalPaths: string[];
+  directoryIdentity: string | null;
+  pendingPath?: string | null;
+  sessions: string[];
+  mergedIds?: string[];
+  pendingMerge?: {
+    targetId: string | null;
+    directoryIdentity: string;
+    automatic: boolean;
+    retiring: boolean;
+  } | null;
+  cancelledTarget?: string | null;
+}
+/** 只读核验结果；人工提交必须回传身份与修订号，不能仅发送用户输入路径。 */
+export interface ProjectMergePreview {
+  id: string;
+  target: string;
+  targetId: string | null;
+  directoryIdentity: string;
+  revision: number;
+  sourceName: string;
+  targetName: string | null;
+  sourceSessions: number;
+  targetSessions: number;
+  automatic: boolean;
+  alias: string | null;
+  model: ProjectModelPreference | null;
+  archived: boolean;
+}
+export interface ProjectLocation {
+  id: string;
+  currentPath: string;
+  state: 'available' | 'unavailable' | 'relocating';
+  candidate: string | null;
+  message: string;
+  error?: AppError;
+}
+export interface ProjectLocations {
+  settings: Settings;
+  locations: ProjectLocation[];
+}
+export interface DirectoryListing {
+  path: string;
+  parent: string | null;
+  directories: string[];
+}
 export interface Settings {
   schemaVersion: number;
   piPath: string;
@@ -19,6 +69,8 @@ export interface Settings {
   extraPath: string[];
   sessionDir: string;
   recentProjects: string[];
+  projects?: ProjectRecord[];
+  projectRevision?: number;
   projectOrder: string[];
   pinnedSessions: string[];
   sidebarItems?: SidebarItem[];
@@ -306,6 +358,7 @@ export type Wakeup =
       runtimeId: string;
       phase: 'started' | 'opened' | 'created';
     }
+  | { type: 'relocating'; runtimeId: string; nextRuntimeId: string }
   | { type: 'released'; runtimeId: string }
   | { type: 'available'; runtimeId: string }
   | { type: 'failed'; runtimeId: string; error: AppError };

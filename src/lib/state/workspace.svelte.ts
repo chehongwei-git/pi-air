@@ -4,6 +4,9 @@ import type {
   SessionSummary,
   SidebarSessionEntry,
   TaskActivity,
+  ProjectLocation,
+  ProjectLocations,
+  ProjectMergePreview,
 } from '../types';
 import { restoreParts, type DraftPart } from '../draft-parts';
 import {
@@ -31,6 +34,130 @@ export class Workspace {
   forceExitAvailable = $state(false);
   private exitTimer?: ReturnType<typeof setTimeout>;
   error = $state('');
+  projectLocations = $state<ProjectLocation[]>([]);
+  private locationRefresh?: Promise<void>;
+  private locationTimer?: ReturnType<typeof setTimeout>;
+  private unwatchProjects?: () => void;
+  private locationTicks = 0;
+  /** 不触碰会话对象身份、正文和草稿，只替换项目路径引用。 */
+  private applyLocations(result: ProjectLocations): void {
+    const previous = this.active.settings.projects ?? [];
+    const changes =
+      result.settings.projects?.flatMap((record) => {
+        return previous
+          .filter((p) => p.id === record.id || record.mergedIds?.includes(p.id))
+          .filter((p) => p.currentPath !== record.currentPath)
+          .map((p) => ({ old: p.currentPath, path: record.currentPath }));
+      }) ?? [];
+    for (const session of this.sessions) {
+      for (const change of changes) {
+        const matches = (path: string) =>
+          session.projectKey(path) === session.projectKey(change.old);
+        if (matches(session.project)) session.project = change.path;
+        if (session.newChatProject !== null && matches(session.newChatProject))
+          session.newChatProject = change.path;
+        session.expandedProjects = [
+          ...new Set(
+            session.expandedProjects.map((key) =>
+              key === session.projectKey(change.old)
+                ? session.projectKey(change.path)
+                : key,
+            ),
+          ),
+        ];
+        session.sessions = session.sessions.map((entry) =>
+          matches(entry.cwd) ? { ...entry, cwd: change.path } : entry,
+        );
+      }
+      session.settings = result.settings;
+    }
+    for (const draft of this.recovery) {
+      const change = changes.find(
+        (c) => this.key(c.old) === this.key(draft.project),
+      );
+      if (change) draft.project = change.path;
+    }
+    this.projectLocations = result.locations;
+    if (!this.initializing) this.persist();
+  }
+  /** 所有目录写入串行化；轮询不能拿合并前的草稿路径重新登记已吸收项目。 */
+  private updateLocations(
+    operation: () => Promise<ProjectLocations>,
+  ): Promise<void> {
+    const pending = (this.locationRefresh ?? Promise.resolve())
+      .then(operation)
+      .then((result) => this.applyLocations(result));
+    const current = pending.finally(() => {
+      if (this.locationRefresh === current) this.locationRefresh = undefined;
+    });
+    this.locationRefresh = current;
+    return current;
+  }
+  refreshProjectLocations(): Promise<void> {
+    if (this.active.settings.projects === undefined) return Promise.resolve();
+    if (this.locationRefresh) return this.locationRefresh;
+    return this.updateLocations(() =>
+      this.api.projectLocations(
+        this.sessions.flatMap((s) => [s.project, s.newChatProject ?? '']),
+      ),
+    );
+  }
+  async associateProject(
+    id: string,
+    target: string,
+    revision: number,
+  ): Promise<void> {
+    await this.updateLocations(() =>
+      this.api.projectLocations([], { id, target, revision }),
+    );
+    await this.active.refreshSessions();
+  }
+  async previewProjectMerge(id: string, target: string) {
+    await this.locationRefresh;
+    return this.api.previewProjectMerge(id, target);
+  }
+  async mergeProjects(preview: ProjectMergePreview): Promise<void> {
+    await this.updateLocations(() => this.api.mergeProjects(preview));
+    await this.active.refreshSessions();
+  }
+  async cancelProjectMerge(id: string): Promise<void> {
+    await this.updateLocations(() =>
+      this.api.cancelProjectMerge(
+        id,
+        this.active.settings.projectRevision ?? 0,
+      ),
+    );
+  }
+  browseDirectories(path: string) {
+    return this.api.browseDirectories(path);
+  }
+  projectLocation(path: string): ProjectLocation | undefined {
+    return this.projectLocations.find(
+      (p) => this.key(p.currentPath) === this.key(path),
+    );
+  }
+  projectIdentity(path: string): string {
+    return (
+      this.active.settings.projects?.find(
+        (p) => this.key(p.currentPath) === this.key(path),
+      )?.id ?? this.key(path)
+    );
+  }
+  private restoredProject(path: string, file?: string): string {
+    const records = this.active.settings.projects ?? [];
+    if (
+      !file &&
+      records.some((p) => this.key(p.currentPath) === this.key(path))
+    )
+      return path;
+    return (
+      records.find((p) =>
+        file
+          ? p.sessions.some((s) => this.key(s) === this.key(file))
+          : p.historicalPaths.some((s) => this.key(s) === this.key(path)),
+      )?.currentPath ?? path
+    );
+  }
   private timer?: ReturnType<typeof setInterval>;
   private polling?: Promise<void>;
   private cacheTick = 0;
@@ -86,6 +213,12 @@ export class Workspace {
     const port: Bridge = {
       ...this.api,
       submitNew: async (...args) => {
+        await this.refreshProjectLocations();
+        const project = this.restoredProject(args[0]);
+        const location = this.projectLocation(project);
+        if (location && location.state !== 'available')
+          throw new Error(location.message);
+        args[0] = project;
         await this.syncPool();
         return this.api.submitNew(...args);
       },
@@ -102,6 +235,7 @@ export class Workspace {
         for (const session of this.sessions) session.settings = settings;
       },
       sessions: async (project, search) => {
+        await this.refreshProjectLocations();
         const result = await this.api.sessions(project, search);
         for (const session of this.sessions) session.sessions = result;
         return result;
@@ -189,8 +323,9 @@ export class Workspace {
         if (typeof draft.preview === 'string')
           session.sidebarPreview = draft.preview;
         session.restored = true;
-        session.project = draft.project;
-        session.newChatProject = draft.path ? null : draft.project;
+        const project = this.restoredProject(draft.project, draft.path);
+        session.project = project;
+        session.newChatProject = draft.path ? null : project;
         session.snapshot = { sessionFile: draft.path };
         const restored = restoreDraft(draft.snapshot);
         session.draft = restored?.text ?? draft.text;
@@ -214,6 +349,12 @@ export class Workspace {
     } catch {
       this.error = '工作区恢复数据读取失败，当前输入仍可使用。';
     }
+    this.unwatchProjects = await this.api.watchProjects(() => {
+      clearTimeout(this.locationTimer);
+      this.locationTimer = setTimeout(() => {
+        void this.refreshProjectLocations().catch(() => this.locationFailure());
+      }, 300);
+    });
     this.timer = setInterval(() => {
       void this.poll();
       this.persist();
@@ -221,6 +362,8 @@ export class Workspace {
   }
   dispose(): void {
     clearInterval(this.timer);
+    clearTimeout(this.locationTimer);
+    this.unwatchProjects?.();
     clearTimeout(this.exitTimer);
     this.persist();
   }
@@ -317,6 +460,12 @@ export class Workspace {
     return task;
   }
   private async ensureLocal(session: Desktop): Promise<void> {
+    await this.refreshProjectLocations();
+    const location = this.projectLocation(
+      session.newChatProject ?? session.project,
+    );
+    if (location && location.state !== 'available')
+      throw new Error(location.message);
     // 等宿主完成回收及旧租约通知，再决定是否需要重新获取。
     await this.syncPool();
     if (session.runtimeId && session.connection === 'ready') {
@@ -680,6 +829,14 @@ export class Workspace {
       session.connection = 'disconnected';
       session.newChatProject = session.project;
     }
+    if (
+      session.runtimeId.startsWith('relocated-') &&
+      session.connection === 'starting'
+    ) {
+      session.runtimeId = '';
+      session.connection = 'disconnected';
+      session.finishRestore();
+    }
     await this.poll();
   }
   /** 并发调用共享正在进行的刷新；归档等待真正结算，不能把跳过刷新视作已完成。 */
@@ -690,8 +847,28 @@ export class Workspace {
     });
     return this.polling;
   }
+  /** 后台目录故障贴近项目显示，不遮挡其他项目或中断任务状态轮询。 */
+  private locationFailure(): void {
+    const records = this.active.settings.projects ?? [];
+    this.projectLocations = records.map((record) => {
+      const previous = this.projectLocations.find((p) => p.id === record.id);
+      if (previous?.state === 'available' && !record.pendingPath)
+        return previous;
+      return {
+        id: record.id,
+        currentPath: record.currentPath,
+        state: 'unavailable',
+        candidate: record.pendingPath ?? null,
+        message: '目录更新未完成，可重试关联',
+      };
+    });
+  }
   private async pollLocal(): Promise<void> {
     try {
+      if (++this.locationTicks % 4 === 0)
+        await this.refreshProjectLocations().catch(() =>
+          this.locationFailure(),
+        );
       const activities = await this.api.activity();
       if (!Array.isArray(activities)) return;
       this.activities = activities;
@@ -705,6 +882,13 @@ export class Workspace {
             session.setConnectionPhase('');
             session.run = 'idle';
             session.error = task.error || '任务执行失败';
+            if (
+              session.runtimeId.startsWith('relocated-') &&
+              session.restoring
+            ) {
+              session.connection = 'failed';
+              session.finishRestore();
+            }
             if (
               !session.snapshot.sessionFile &&
               session.runtimeId.startsWith('reserved-')

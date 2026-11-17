@@ -317,6 +317,20 @@ export default function desktopBridge(pi) {
       }
     },
   });
+  // 只由宿主校验项目归属后调用；Pi 自己维护 session manager 和历史持久化。
+  pi.registerCommand('pi-desktop-relocate-v1', {
+    description: 'Desktop bridge v1: resume a relocated project session',
+    handler: async (args, ctx) => {
+      if (!ctx.isIdle()) throw new Error('请等待当前任务完成后切换目录。');
+      const input = JSON.parse(args);
+      if (typeof input.path !== 'string' || typeof input.cwd !== 'string')
+        throw new Error('无效项目关联。');
+      const result = await ctx.switchSession(input.path, {
+        cwdOverride: input.cwd,
+      });
+      if (result.cancelled) throw new Error('扩展取消了会话恢复。');
+    },
+  });
   pi.registerCommand(bridgeCommands.navigate, {
     description: 'Desktop bridge v1: navigate the active session tree',
     handler: async (args, ctx) => {
