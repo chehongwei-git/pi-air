@@ -51,16 +51,22 @@
   let index = $derived(turns.findIndex((item) => item.id === turn?.id));
   // 未知计数不能按零处理；汇总只包含两项均精确的文本文件。
   let counted = $derived(
-    turn?.files.filter((file) => file.added != null && file.removed != null) ??
-      [],
+    turn?.files.filter(
+      (file) =>
+        file.attribution !== 'unconfirmed' &&
+        file.added != null &&
+        file.removed != null,
+    ) ?? [],
   );
   let added = $derived(counted.reduce((sum, file) => sum + file.added!, 0));
   let removed = $derived(counted.reduce((sum, file) => sum + file.removed!, 0));
   let current = $derived(review ? review.current?.id : lastOpened);
   let incomplete = $derived(
-    turn?.warnings.some((warning) =>
-      /未比较|不完整|无法读取|超限/.test(warning),
-    ) ?? false,
+    (turn?.captureVersion ?? 0) >= 3
+      ? turn?.coverage === 'partial'
+      : (turn?.warnings.some((warning) =>
+          /未比较|不完整|无法读取|超限/.test(warning),
+        ) ?? false),
   );
   let partialStats = $derived(
     incomplete ||
@@ -74,7 +80,7 @@
     file: TurnChanges['files'][number],
     button: HTMLButtonElement,
   ): void {
-    if (!turn) return;
+    if (!turn || !file.contentRef || file.attribution === 'unconfirmed') return;
     selected = turn.id;
     lastOpened = id(file);
     onselect(
@@ -237,6 +243,9 @@
             {warning}
           </p>{/each}
         <p>保留最近 10 轮；旧会话可从处理过程查看单次变更。</p>
+        {#each turn?.files.filter((file) => file.reason) ?? [] as file}<p>
+            {file.path}：{file.reason}
+          </p>{/each}
       </div>{/if}
     {#if expanded}
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions (Escape 收起文件区并恢复入口。) -->
@@ -271,7 +280,8 @@
               class:selected={current === id(file)}
               aria-pressed={current === id(file)}
               onclick={(event) => open(file, event.currentTarget)}
-              title={file.path}
+              title={file.reason ? `${file.path}：${file.reason}` : file.path}
+              disabled={!file.contentRef || file.attribution === 'unconfirmed'}
             >
               <span class="file-icon"><Icon name="file" size={15} /></span>
               <strong class="file-name">{file.path.split('/').at(-1)}</strong
@@ -293,7 +303,13 @@
                     ? 'D'
                     : 'M'}</span
               >
-              {#if file.binary}<span class="file-stats">二进制</span
+              {#if file.attribution === 'unconfirmed'}<span class="file-stats"
+                  >{file.reason?.includes('未比较') ||
+                  file.reason?.includes('超过') ||
+                  file.reason?.includes('无法读取')
+                    ? '未比较'
+                    : '归属未确认'}</span
+                >{:else if file.binary}<span class="file-stats">二进制</span
                 >{:else if file.added == null || file.removed == null}<span
                   class="file-stats">无法精确统计</span
                 >{:else}<span class="file-stats"
@@ -399,6 +415,9 @@
     overscroll-behavior: contain;
     padding-bottom: 4px;
     scrollbar-width: thin;
+  }
+  .changes-file:disabled {
+    cursor: default;
   }
   .changes-file {
     width: 100%;

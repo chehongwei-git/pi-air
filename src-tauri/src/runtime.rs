@@ -691,12 +691,16 @@ async fn actor(
                                         for file in files {
                                             let diff = file["diff"].as_str().unwrap_or("");
                                             let key = format!("{}:{}", turn_id, file["path"]);
-                                            let reference = if let Some(reference) = change_refs.get(&key) { reference.clone() } else {
+                                            let reference = if diff.is_empty() {
+                                                Value::Null
+                                            } else if let Some(reference) = change_refs.get(&key) {
+                                                Value::String(reference.clone())
+                                            } else {
                                                 let reference = store.body(diff)?;
-                                                change_refs.insert(key, reference.clone()); reference
+                                                change_refs.insert(key, reference.clone()); Value::String(reference)
                                             };
                                             file.as_object_mut().unwrap().remove("diff");
-                                            file["contentRef"] = reference.into();
+                                            file["contentRef"] = reference;
                                         }
                                     }
                                 }
@@ -784,6 +788,15 @@ async fn actor(
                     };
                     if event["type"] == "agent_start" {
                         changes = tokio::task::spawn_blocking(move || { changes.begin("后续任务"); changes }).await.expect("changes recorder panicked");
+                    }
+                    if matches!(event["type"].as_str(), Some("tool_execution_start" | "tool_execution_end")) {
+                        let (recorder, event) = tokio::task::spawn_blocking(move || {
+                            changes.event(&event);
+                            (changes, event)
+                        }).await.expect("changes recorder panicked");
+                        changes = recorder;
+                        if let Err(error) = projection.event(event, &mut store) { failure=Some(error); break; }
+                        continue;
                     }
                     if event["type"] == "agent_settled" {
                         // 错误后的退避也允许停止；取消应覆盖此前失败尝试的临时标记。

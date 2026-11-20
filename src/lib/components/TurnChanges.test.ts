@@ -123,6 +123,63 @@ describe('轮次变更', () => {
     expect(screen.getByText('本轮没有检测到可展示的文件变更。')).toBeTruthy();
   });
 
+  it('keeps uncertain targets visible without opening or counting their differences', async () => {
+    const onselect = vi.fn();
+    render(TurnChanges, {
+      turns: [
+        {
+          ...turns[0],
+          captureVersion: 3,
+          coverage: 'partial',
+          warnings: ['其他工具可能存在未记录修改。'],
+          files: [
+            turns[0].files[0],
+            {
+              ...turns[0].files[0],
+              path: 'conflict.ts',
+              attribution: 'unconfirmed',
+              reason: '其他会话涉及同一文件，修改归属未确认',
+              contentRef: null,
+            },
+          ],
+        },
+      ],
+      expandedInitially: true,
+      onselect,
+      onretry: vi.fn(),
+    });
+    const target = screen.getByRole('button', { name: /conflict.ts/ });
+    expect(target).toBeDisabled();
+    expect(target).toHaveTextContent('归属未确认');
+    expect(screen.getByLabelText('已精确统计部分')).toHaveTextContent('+2−1');
+    await fireEvent.click(target);
+    expect(onselect).not.toHaveBeenCalled();
+    await fireEvent.click(screen.getByLabelText('采集范围与说明'));
+    expect(
+      screen.getByText('conflict.ts：其他会话涉及同一文件，修改归属未确认'),
+    ).toBeVisible();
+  });
+
+  it('uses structured coverage for empty results even without warning keywords', () => {
+    render(TurnChanges, {
+      turns: [
+        {
+          ...turns[0],
+          captureVersion: 3,
+          coverage: 'partial',
+          files: [],
+          warnings: [],
+        },
+      ],
+      expandedInitially: true,
+      onselect: vi.fn(),
+      onretry: vi.fn(),
+    });
+    expect(
+      screen.getByText('部分文件未比较，无法确认本轮是否还有其他变更。'),
+    ).toBeVisible();
+  });
+
   it('defaults collapsed and opens merged file differences', async () => {
     const onselect = vi.fn();
     render(TurnChanges, { turns, onselect, onretry: vi.fn() });

@@ -1,14 +1,19 @@
-//! 每轮以工作区实际内容为基线；不依赖 Git HEAD，不把工具调用差异相加。
+//! 工具目标按会话采集；保留有界净差异算法与旧版工作区记录兼容。
+#[path = "change_capture.rs"]
+mod capture;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
+use std::path::Path;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 const FILE_LIMIT: u64 = 1024 * 1024;
 const TOTAL_LIMIT: usize = 16 * 1024 * 1024;
 const ENTRY_LIMIT: usize = 10_000;
+#[cfg(test)]
 const EXCLUDED: &[&str] = &[
     ".git",
     "node_modules",
@@ -39,9 +44,11 @@ impl Snapshot {
                 .any(|(index, _)| self.unknown_dirs.contains(&path[..index]))
     }
 }
+#[cfg(test)]
 fn snapshot(root: &Path) -> Snapshot {
     snapshot_with_limits(root, TOTAL_LIMIT, ENTRY_LIMIT)
 }
+#[cfg(test)]
 fn snapshot_with_limits(root: &Path, total_limit: usize, entry_limit: usize) -> Snapshot {
     fn walk(
         root: &Path,
@@ -182,6 +189,13 @@ pub struct FileChange {
     /// 仅文本差异有精度；替换视图的增删计数必须为空。
     #[serde(default)]
     pub diff_accuracy: Option<String>,
+    /// observed 表示本会话工具目标的观测差异，并非原子写入归因。
+    #[serde(default)]
+    pub attribution: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub call_ids: Vec<String>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +208,8 @@ pub struct Turn {
     /// 缺失表示旧版采集，不能据此声称历史覆盖范围已被重新验证。
     #[serde(default)]
     pub capture_version: Option<u8>,
+    #[serde(default)]
+    pub coverage: Option<String>,
 }
 /// Myers 只按编辑距离扩展前沿；预算按操作数与轨迹内存计算，结果不依赖机器速度。
 fn edit_script(
@@ -455,6 +471,9 @@ fn compare(before: Snapshot, after: Snapshot, title: String, state: String) -> T
             diff: text,
             binary,
             diff_accuracy,
+            attribution: None,
+            reason: None,
+            call_ids: Vec::new(),
         });
     }
     Turn {
@@ -464,6 +483,7 @@ fn compare(before: Snapshot, after: Snapshot, title: String, state: String) -> T
         files,
         warnings,
         capture_version: Some(2),
+        coverage: None,
     }
 }
 /// 每个运行时独立持有基线；磁盘记录按真实会话身份隔离，最多保留最近十轮。
@@ -471,7 +491,7 @@ pub struct Recorder {
     root: PathBuf,
     directory: PathBuf,
     session: String,
-    baseline: Option<(Snapshot, String)>,
+    baseline: Option<capture::Capture>,
 }
 impl Recorder {
     pub fn new(root: PathBuf, directory: PathBuf) -> Self {
@@ -501,7 +521,13 @@ impl Recorder {
     }
     pub fn begin(&mut self, title: &str) {
         if self.baseline.is_none() {
-            self.baseline = Some((snapshot(&self.root), title.chars().take(80).collect()));
+            self.baseline = Some(capture::Capture::new(title));
+        }
+    }
+    /// 必须在阻塞池中调用；文件 IO 不占用异步执行线程。
+    pub fn event(&mut self, event: &serde_json::Value) {
+        if let Some(capture) = &mut self.baseline {
+            capture.event(&self.root, event);
         }
     }
     pub fn list(&self) -> Vec<Turn> {
@@ -521,11 +547,11 @@ impl Recorder {
             .unwrap_or_default();
         // 旧版替换计数无法恢复为精确值；只修正精度标记，不伪造历史快照。
         for turn in &mut turns {
-            if turn.capture_version.is_none()
+            if turn.capture_version.unwrap_or(0) < 3
                 && !turn.warnings.iter().any(|w| w.contains("旧版采集结果"))
             {
                 turn.warnings
-                    .push("旧版采集结果，文件覆盖范围与统计未经新版规则验证。".into());
+                    .push("旧版采集结果：工作区快照，修改归属未验证。".into());
             }
             for file in &mut turn.files {
                 if file.diff.starts_with("! 完整替换") {
@@ -547,10 +573,10 @@ impl Recorder {
         turns
     }
     pub fn finish(&mut self, state: &str) -> std::io::Result<()> {
-        let Some((before, title)) = self.baseline.take() else {
+        let Some(capture) = self.baseline.take() else {
             return Ok(());
         };
-        let turn = compare(before, snapshot(&self.root), title, state.into());
+        let turn = capture.finish(state.into());
         if self.session.is_empty() {
             return Err(std::io::Error::other("缺少会话身份，未保存轮次变更"));
         }
@@ -756,14 +782,20 @@ mod tests {
         let mut recorder = Recorder::new(root.path().into(), storage.path().into());
         recorder.context(&serde_json::json!({"sessionFile":"rounds"}));
         recorder.begin("create");
+        recorder.event(&serde_json::json!({"type":"tool_execution_start","toolCallId":"create","toolName":"write","args":{"path":"a"}}));
         std::fs::write(root.path().join("a"), "one\n").unwrap();
+        recorder.event(&serde_json::json!({"type":"tool_execution_end","toolCallId":"create"}));
         recorder.finish("done").unwrap();
         recorder.begin("modify");
+        recorder.event(&serde_json::json!({"type":"tool_execution_start","toolCallId":"modify","toolName":"edit","args":{"path":"a"}}));
         std::fs::write(root.path().join("a"), "temporary\n").unwrap();
         std::fs::write(root.path().join("a"), "two\nextra\n").unwrap();
+        recorder.event(&serde_json::json!({"type":"tool_execution_end","toolCallId":"modify"}));
         recorder.finish("done").unwrap();
         recorder.begin("delete");
+        recorder.event(&serde_json::json!({"type":"tool_execution_start","toolCallId":"delete","toolName":"edit","args":{"path":"a"}}));
         std::fs::remove_file(root.path().join("a")).unwrap();
+        recorder.event(&serde_json::json!({"type":"tool_execution_end","toolCallId":"delete"}));
         recorder.finish("done").unwrap();
         let turns = recorder.list();
         assert_eq!(
@@ -848,8 +880,12 @@ mod tests {
         let mut recorder = Recorder::new(root.path().into(), storage.path().into());
         recorder.context(&serde_json::json!({"sessionFile":"session-a"}));
         recorder.begin("prompt");
+        recorder.event(&serde_json::json!({"type":"tool_execution_start","toolCallId":"delete","toolName":"edit","args":{"path":"deleted"}}));
         std::fs::remove_file(root.path().join("deleted")).unwrap();
+        recorder.event(&serde_json::json!({"type":"tool_execution_end","toolCallId":"delete"}));
+        recorder.event(&serde_json::json!({"type":"tool_execution_start","toolCallId":"binary","toolName":"write","args":{"path":"binary"}}));
         std::fs::write(root.path().join("binary"), [0, 1, 2]).unwrap();
+        recorder.event(&serde_json::json!({"type":"tool_execution_end","toolCallId":"binary"}));
         recorder.finish("stopped").unwrap();
         let mut restored = Recorder::new(root.path().into(), storage.path().into());
         restored.context(&serde_json::json!({"sessionFile":"session-a"}));

@@ -282,6 +282,8 @@ export interface TurnChanges {
   state: string;
   warnings: string[];
   captureVersion?: number | null;
+  /** 新版按工具目标采集；partial 表示另有未覆盖或归属不确定的修改。 */
+  coverage?: 'tool-targets' | 'partial' | null;
   files: {
     path: string;
     kind: string;
@@ -290,7 +292,10 @@ export interface TurnChanges {
     binary: boolean;
     /** 超出精确比较预算时只提供替换视图，增删统计为空。 */
     diffAccuracy?: 'exact' | 'replacement' | null;
-    contentRef: string;
+    contentRef: string | null;
+    attribution?: 'observed' | 'unconfirmed' | null;
+    reason?: string | null;
+    callIds?: string[];
   }[];
 }
 export interface ContentPage {

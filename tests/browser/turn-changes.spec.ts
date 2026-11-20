@@ -60,6 +60,52 @@ test('partial results remain explicit across themes, narrow layouts and keyboard
     0,
   );
 });
+test('uncertain targets preserve context and stay out of the totals', async ({
+  page,
+}) => {
+  await page.route('**/turn-changes-fixture', (route) =>
+    route.fulfill({
+      contentType: 'text/html',
+      body: '<!doctype html><html><head><meta charset="utf-8"></head><body><main></main><script type="module" src="/tests/browser/turn-changes-fixture.ts"></script></body></html>',
+    }),
+  );
+  await page.goto('/turn-changes-fixture');
+  await page
+    .getByRole('button', { name: '归属未确认轮次', exact: true })
+    .click();
+  await page.getByRole('button', { name: /代码变更/ }).click();
+  const file = page.getByRole('button', { name: /conflict.ts/ });
+  for (const theme of ['light', 'dark']) {
+    await page.evaluate(
+      (theme) => (document.documentElement.dataset.theme = theme),
+      theme,
+    );
+    for (const width of [1500, 480]) {
+      await page.setViewportSize({ width, height: 900 });
+      await expect(file).toBeVisible();
+      await expect(file).toBeDisabled();
+      await expect(file).toContainText('归属未确认');
+      await expect(page.getByLabel('已精确统计部分')).toHaveText('+1−1');
+      const info = page.getByRole('button', { name: '采集范围与说明' });
+      await info.focus();
+      await info.press('Enter');
+      await expect(
+        page.getByText('src/conflict.ts：其他会话涉及同一文件，修改归属未确认'),
+      ).toBeVisible();
+      await page.screenshot({
+        path: `test-results/attribution-${theme}-${width}.png`,
+      });
+      expect(
+        await page.evaluate(
+          () => document.documentElement.scrollWidth <= innerWidth,
+        ),
+      ).toBe(true);
+      await info.press('Enter');
+      await expect(page.getByLabel('消息输入')).toHaveValue('继续调整');
+    }
+  }
+});
+
 test('review keeps full height when the file list or composer grows', async ({
   page,
 }) => {

@@ -47,6 +47,31 @@
       ...turns,
     ];
   }
+  // 测试入口模拟归属无法确认及无法读取正文的宿主结果。
+  function uncertainRound() {
+    turns = [
+      {
+        ...turns[0],
+        id: 'uncertain',
+        captureVersion: 3,
+        coverage: 'partial',
+        warnings: ['其他工具可能存在未记录修改。'],
+        files: [
+          turns[0].files[0],
+          {
+            ...turns[0].files[0],
+            path: 'src/conflict.ts',
+            attribution: 'unconfirmed',
+            reason: '其他会话涉及同一文件，修改归属未确认',
+            contentRef: null,
+            added: null,
+            removed: null,
+          },
+        ],
+      },
+      ...turns,
+    ];
+  }
   // 测试入口模拟宿主生成新快照，不改变生产组件接口。
   function nextRound() {
     turns = [
@@ -96,6 +121,7 @@
         onretry={() => {}}
         onselect={(message, trigger) => open?.(message, trigger)}
       />
+      <button onclick={uncertainRound}>归属未确认轮次</button>
       <button onclick={nextRound}>生成新轮次</button>
       <button onclick={() => partialRound()}>部分统计轮次</button>
       <button onclick={() => partialRound(true)}>未完整采集轮次</button>

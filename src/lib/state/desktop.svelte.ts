@@ -184,6 +184,7 @@ export class Desktop {
       this.turnChanges = turns.map((turn) => ({
         ...turn,
         files: turn.files.map((file) => {
+          if (!file.contentRef) return file;
           const message = this.content.bind(
             {
               id: `turn:${turn.id}:${file.path}`,
