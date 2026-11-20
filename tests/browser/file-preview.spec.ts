@@ -6,6 +6,7 @@ for (const narrow of [false, true]) {
     await page.setViewportSize({ width: narrow ? 480 : 1280, height: 800 });
     await page.addInitScript(() => {
       (window as any).calls = [];
+      let windowsAttempts = 0;
       (window as any).__TAURI_INTERNALS__ = {
         invoke: async (command: string, args: any) => {
           (window as any).calls.push({ command, args });
@@ -15,6 +16,9 @@ for (const narrow of [false, true]) {
           )
             return;
           if (command !== 'preview_file') throw new Error(command);
+          // 首次读取失败后重试，仍须使用去掉 URL 前缀及行号的 Windows 路径。
+          if (args.path === 'C:/work/说明 a.ts' && windowsAttempts++ === 0)
+            throw new Error('文件暂时无法读取');
           if (args.path.includes('missing'))
             throw new Error('文件不存在，请检查路径');
           if (args.path.startsWith('../'))
@@ -69,6 +73,17 @@ for (const narrow of [false, true]) {
       await page.evaluate(
         () => (document.documentElement.dataset.theme = 'dark'),
       );
+    // 用户原句中的代码符号仅保留代码外观，不提供链接或触发预览请求。
+    const symbol = page
+      .locator('.markdown code')
+      .filter({ hasText: /^FileTarget\.line$/ });
+    await expect(symbol).toHaveCount(1);
+    await expect(symbol.locator('xpath=ancestor::a')).toHaveCount(0);
+    await expect(
+      page.getByRole('link', { name: 'FileTarget.line', exact: true }),
+    ).toHaveCount(0);
+    await symbol.click();
+    await expect(page.locator('.file-preview-panel')).toHaveCount(0);
     for (const [name, url] of [
       ['btdig.com', 'https://btdig.com/'],
       ['nyaa.si', 'https://nyaa.si/'],
@@ -96,6 +111,26 @@ for (const narrow of [false, true]) {
     await page.screenshot({
       path: `test-results/website-links-${narrow ? 'narrow-dark' : 'wide-light'}.png`,
     });
+    const windowsFile = page.getByRole('link', {
+      name: 'Windows 文件',
+      exact: true,
+    });
+    await windowsFile.click();
+    await expect(page.getByRole('alert')).toContainText('文件暂时无法读取');
+    await page.getByRole('button', { name: '重试读取', exact: true }).click();
+    await expect(page.locator('.source-line.current')).toContainText(
+      '修改后的代码',
+    );
+    expect(await page.evaluate(() => (window as any).calls.at(-1))).toEqual({
+      command: 'preview_file',
+      args: {
+        project: '/fixture-project',
+        path: 'C:/work/说明 a.ts',
+        approved: false,
+      },
+    });
+    await page.getByRole('button', { name: '关闭预览' }).press('Escape');
+    await expect(windowsFile).toBeFocused();
     const code = page.getByRole('link', { name: 'src/main.ts:2' });
     await code.click();
     await expect(

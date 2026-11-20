@@ -91,6 +91,135 @@ describe('对话文件入口', () => {
     });
     expect(codeFileTarget('src/100%25.ts')).toEqual({ path: 'src/100%25.ts' });
   });
+  it('Windows 盘符链接经过 Markdown 渲染后仍传递真实路径和行号', () => {
+    for (const href of [
+      '/C:/work/%E8%AF%B4%E6%98%8E%20a.ts:42:3',
+      'C:/work/%E8%AF%B4%E6%98%8E%20a.ts:42:3',
+      'file:///C:/work/%E8%AF%B4%E6%98%8E%20a.ts:42:3',
+      '/C:/work/%E8%AF%B4%E6%98%8E%20a.ts#L42-L45',
+      '/C%3A/work/%E8%AF%B4%E6%98%8E%20a.ts:42',
+    ]) {
+      const root = document.createElement('div');
+      root.innerHTML = markdown(`[文件](${href})`);
+      expect(
+        root.querySelector('a')?.getAttribute('data-file-path'),
+        href,
+      ).toBe('C:/work/说明 a.ts');
+      expect(root.querySelector('a')?.getAttribute('data-file-line')).toBe(
+        '42',
+      );
+    }
+    expect(fileTarget('/tmp/说明.ts:42')).toEqual({
+      path: '/tmp/说明.ts',
+      line: 42,
+    });
+    expect(fileTarget('/C:/work/100%2525.ts')).toEqual({
+      path: 'C:/work/100%25.ts',
+    });
+    expect(codeFileTarget('C:\\work\\main.ts:42')).toEqual({
+      path: 'C:\\work\\main.ts',
+      line: 42,
+    });
+    expect(fileTarget('/%2Fserver/share.txt')).toBeNull();
+    expect(fileTarget('%5C%5Cserver/share.txt')).toBeNull();
+  });
+  it('代码符号与未知裸后缀不自动识别成文件，行号不能绕过限制', () => {
+    for (const value of [
+      'FileTarget.line',
+      'user.name',
+      'process.env',
+      'foo.bar',
+    ]) {
+      for (const suffix of ['', ':42', ':42:3', '#L42', '#L42-L45'])
+        expect(codeFileTarget(value + suffix), value + suffix).toBeNull();
+    }
+  });
+  it('常见裸文件名、配置文件与明确路径保留文件入口及行号', () => {
+    for (const value of [
+      'main.ts',
+      'README.md',
+      'MAIN.TS',
+      'data.jsonl',
+      'app.svelte',
+      '.gitignore',
+      '.gitattributes',
+      '.gitmodules',
+      '.dockerignore',
+      '.editorconfig',
+      '.npmrc',
+      '.nvmrc',
+      '.prettierrc',
+      '.eslintrc',
+      '.env',
+      '.env.local',
+      'Dockerfile',
+      'Containerfile',
+      'Makefile',
+      'GNUmakefile',
+      'LICENSE',
+      'LICENCE',
+      'README',
+      'CHANGELOG',
+      './foo.bar',
+      '../foo.bar',
+      'src/custom.data',
+      './LICENSE',
+      '/tmp/说明.data',
+      'C:/work/custom.data',
+      'C:\\work\\custom.data',
+    ]) {
+      expect(codeFileTarget(value), value).toEqual({ path: value });
+      for (const suffix of [':42', ':42:3', '#L42', '#L42-L45'])
+        expect(codeFileTarget(value + suffix), value + suffix).toEqual({
+          path: value,
+          line: 42,
+        });
+    }
+    expect(codeFileTarget('/C:/work/custom.data:42:3')).toEqual({
+      path: 'C:/work/custom.data',
+      line: 42,
+    });
+    expect(codeFileTarget('file:///tmp/custom.data#L42')).toEqual({
+      path: '/tmp/custom.data',
+      line: 42,
+    });
+    for (const value of ['.', '..', './', '../', 'src/.', 'src/..', 'src/'])
+      expect(codeFileTarget(value), value).toBeNull();
+  });
+  it('实际 Markdown 渲染保留代码符号文字，仅明确的文件生成入口', () => {
+    const root = document.createElement('div');
+    root.innerHTML = markdown(
+      '继续将受支持的 `:行号[:列号]` 和 `#L行号` 后缀拆成 `FileTarget.line`，不传入文件系统路径。通过渲染测试覆盖 Markdown 规范化后的实际输入。\n\n' +
+        '`user.name`、`process.env`、`foo.bar:42`；`main.ts:12`、`README.md`、`./foo.bar#L42`。\n\n' +
+        '[`FileTarget.line`](docs/contract.custom:8:2)\n\n```ts\nmain.ts:12\nFileTarget.line\n```',
+    );
+    const code = [...root.querySelectorAll('p code')];
+    for (const value of [
+      ':行号[:列号]',
+      '#L行号',
+      'FileTarget.line',
+      'user.name',
+      'process.env',
+      'foo.bar:42',
+    ]) {
+      const item = code.find((node) => node.textContent === value);
+      expect(item, value).toBeDefined();
+      expect(item?.closest('a'), value).toBeNull();
+    }
+    expect(
+      [...root.querySelectorAll('[data-file-path]')].map((node) => [
+        node.getAttribute('data-file-path'),
+        node.getAttribute('data-file-line'),
+      ]),
+    ).toEqual([
+      ['main.ts', '12'],
+      ['README.md', null],
+      ['./foo.bar', '42'],
+      ['docs/contract.custom', '8'],
+    ]);
+    expect(root.querySelectorAll('a')).toHaveLength(4);
+    expect(root.querySelector('pre a')).toBeNull();
+  });
   it('拒绝危险协议、网络共享与歧义代码', () => {
     for (const path of [
       'javascript:alert(1)',
@@ -109,6 +238,11 @@ describe('对话文件入口', () => {
       'a = b.ts',
       'hello',
       '<file.ts>',
+      'file://server/a',
+      '//server/a',
+      '\\\\server\\a',
+      'pi://run/file.ts',
+      'src/file.ts;run',
     ])
       expect(codeFileTarget(path)).toBeNull();
   });

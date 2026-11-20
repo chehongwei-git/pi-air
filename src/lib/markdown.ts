@@ -58,6 +58,8 @@ export function markdown(text: string): string {
     FORBID_ATTR: ['style'],
     ALLOW_DATA_ATTR: false,
     ADD_ATTR: ['data-file-path', 'data-file-line'],
+    // 盘符会被清洗器视为自定义协议；此属性仅交给文件接口，不作为导航 URL 使用。
+    ADD_URI_SAFE_ATTR: ['data-file-path'],
   });
   if (text.length + html.length < 1024 * 1024) {
     cache.set(text, html);

@@ -7,7 +7,7 @@
     {
       id: 'files',
       role: 'assistant',
-      text: '网站 `btdig.com`、`nyaa.si` 和[搜索](example.com/search?q=test)。已修改 `src/main.ts:2`，下载[报告](docs/报告.pdf)或[图片](assets/图.png)。另见[说明](docs/说明.md)、[失败](docs/missing.txt)、[项目外](../outside.txt)和[长路径](docs/很长的目录名称/另一个很长的目录名称/包含完整说明的长文件名称.md)。',
+      text: '继续将受支持的 `:行号[:列号]` 和 `#L行号` 后缀拆成 `FileTarget.line`，不传入文件系统路径。网站 `btdig.com`、`nyaa.si` 和[搜索](example.com/search?q=test)。已修改 `src/main.ts:2`，下载[报告](docs/报告.pdf)或[图片](assets/图.png)。另见[Windows 文件](/C:/work/%E8%AF%B4%E6%98%8E%20a.ts:2:3)、[说明](docs/说明.md)、[失败](docs/missing.txt)、[项目外](../outside.txt)和[长路径](docs/很长的目录名称/另一个很长的目录名称/包含完整说明的长文件名称.md)。',
       thinking: '',
       status: 'done',
       name: null,

@@ -42,7 +42,6 @@ export function fileTarget(value: string, encoded = true): FileTarget | null {
       const url = new URL(path);
       if (url.hostname && url.hostname !== 'localhost') return null;
       path = url.pathname;
-      if (/^\/[a-z]:\//i.test(path)) path = path.slice(1);
     } catch {
       return null;
     }
@@ -62,16 +61,39 @@ export function fileTarget(value: string, encoded = true): FileTarget | null {
     path.startsWith('\\\\')
   )
     return null;
+  // AI 常用 /C:/… 表示 Windows 绝对链接；解码后统一处理，避免宿主将盘符拼进项目目录。
+  if (/^\/[a-z]:[\\/]/i.test(path)) path = path.slice(1);
   return { path, ...(line && Number.isSafeInteger(line) ? { line } : {}) };
 }
+
+/** 自动链接采用常见后缀与约定文件名，宁可遗漏特殊文件，也不把任意对象属性当成路径。 */
+const fileSuffixes = new Set(
+  'txt md markdown mdown log csv tsv json jsonc jsonl yaml yml toml xml ini conf config rs ts tsx js jsx mjs cjs mts cts java css scss sass less html htm svelte vue c h cc cpp hpp go py pyi rb php sh bash zsh fish ps1 bat cmd sql kt kts swift m mm cs fs fsx dart lua r ipynb proto graphql gql prisma lock pdf doc docx xls xlsx ppt pptx odt ods odp rtf png jpg jpeg gif webp bmp svg ico tiff tif heic avif mp3 wav ogg flac mp4 mov webm mkv zip gz tar tgz 7z rar wasm'.split(
+    ' ',
+  ),
+);
+const fileNames = new Set(
+  '.gitignore .gitattributes .gitmodules .dockerignore .editorconfig .npmrc .nvmrc .prettierrc .eslintrc .env dockerfile containerfile makefile gnumakefile license licence readme changelog'.split(
+    ' ',
+  ),
+);
 
 /** 保守识别完整的行内代码路径，不扫描代码块、表达式、命令或一般正文。 */
 export function codeFileTarget(value: string): FileTarget | null {
   if (/\s|[<>|*?`"'(){}=;]/.test(value)) return null;
   const target = fileTarget(value, false);
-  if (!target || !/(?:^|[\\/])(?:\.[\w-]+|[^\\/]+\.[\w-]+)$/.test(target.path))
-    return null;
-  return target;
+  if (!target) return null;
+  const name = target.path.split(/[\\/]/).pop() ?? '';
+  if (!name || name === '.' || name === '..') return null;
+  // 明确路径允许未知后缀与无扩展名文件；此处仅推断意图，不访问磁盘确认存在性。
+  if (/[\\/]/.test(target.path)) return target;
+  const lower = name.toLowerCase();
+  const dot = lower.lastIndexOf('.');
+  return fileNames.has(lower) ||
+    /^\.env\..+/.test(lower) ||
+    (dot > 0 && fileSuffixes.has(lower.slice(dot + 1)))
+    ? target
+    : null;
 }
 
 export interface FilePreview {

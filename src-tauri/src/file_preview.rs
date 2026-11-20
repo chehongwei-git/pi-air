@@ -46,6 +46,26 @@ pub fn resolve(project: &str, value: &str) -> Result<(PathBuf, PathBuf)> {
     if value.is_empty() || value.chars().any(char::is_control) {
         return Err(AppError::new("FILE", "文件路径无效"));
     }
+    #[cfg(windows)]
+    {
+        // 盘符必须位于开头且是绝对路径；其余冒号会成为非法文件名或 NTFS 数据流。
+        let bytes = value.as_bytes();
+        let drive = bytes.first().is_some_and(u8::is_ascii_alphabetic)
+            && bytes.get(1) == Some(&b':')
+            && matches!(bytes.get(2), Some(b'/' | b'\\'));
+        if value
+            .chars()
+            .any(|c| matches!(c, '<' | '>' | '"' | '|' | '?' | '*'))
+            || value
+                .char_indices()
+                .any(|(index, c)| c == ':' && !(drive && index == 1))
+        {
+            return Err(AppError::new(
+                "FILE",
+                "文件路径无效，请使用本地绝对路径或相对于会话目录的路径，行号不能包含在路径中",
+            ));
+        }
+    }
     #[cfg(not(windows))]
     if value.as_bytes().get(1) == Some(&b':') || value.contains('\\') {
         return Err(AppError::new("FILE", "此路径不属于当前操作系统"));
@@ -278,6 +298,39 @@ mod tests {
         let large = preview(project, "large.txt", false).unwrap();
         assert!(large.truncated);
         assert!(large.text.unwrap().len() <= TEXT_LIMIT);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_and_invalid_drive_forms() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        fs::create_dir(&root).unwrap();
+        let file = root.join("说明 a.txt");
+        fs::write(&file, "你好").unwrap();
+        let project = root.to_str().unwrap();
+        for path in [
+            "说明 a.txt".to_owned(),
+            file.to_str().unwrap().to_owned(),
+            file.to_str().unwrap().replace('\\', "/"),
+        ] {
+            assert_eq!(
+                preview(project, &path, false).unwrap().text.as_deref(),
+                Some("你好")
+            );
+        }
+        // 宿主不猜测 URL 或行号；未经过前端转换的非法输入必须得到业务错误。
+        for path in [
+            "/C:/work/file.txt",
+            "C:relative.txt",
+            "file.txt:42",
+            "folder/C:/file.txt",
+            "file.txt:stream",
+            "bad?.txt",
+        ] {
+            let error = resolve(project, path).unwrap_err();
+            assert_eq!(error.code, "FILE");
+            assert!(error.message.starts_with("文件路径无效"));
+        }
     }
     #[cfg(unix)]
     #[test]
