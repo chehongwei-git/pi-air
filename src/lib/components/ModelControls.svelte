@@ -10,8 +10,14 @@
   let {
     desktop,
     disabled = false,
+    onsettings,
     busy = $bindable(false),
-  }: { desktop: Desktop; disabled?: boolean; busy?: boolean } = $props();
+  }: {
+    desktop: Desktop;
+    disabled?: boolean;
+    busy?: boolean;
+    onsettings?: () => void;
+  } = $props();
   let error = $state('');
   let thinkingOpen = $state(false);
   let thinkingRoot: HTMLDivElement;
@@ -53,17 +59,25 @@
   );
   const unavailable = $derived(
     disabled ||
+      desktop.preparing ||
       busy ||
       desktop.submitting ||
       !!desktop.openingSession ||
-      (desktop.connection !== 'ready' && desktop.newChatProject === null) ||
+      (desktop.connection !== 'ready' &&
+        desktop.newChatProject === null &&
+        !(
+          desktop.preparationRequested &&
+          desktop.connection === 'failed' &&
+          desktop.runtimeId &&
+          !desktop.modelsError
+        )) ||
       desktop.task?.state === 'queued' ||
       desktop.run === 'aborting',
   );
 
   // 菜单使用原生按钮承接焦点，Tab 移出或点击外部时关闭且不抢焦点。
   async function openThinking(last = false) {
-    if (unavailable || levels.length < 2) return;
+    if (unavailable || desktop.modelsLoading || levels.length < 2) return;
     thinkingOpen = true;
     await tick();
     const items = thinkingRoot.querySelectorAll<HTMLButtonElement>(
@@ -103,7 +117,7 @@
     kind: 'model' | 'thinking',
     value: string,
   ): Promise<void> {
-    if (unavailable) return;
+    if (unavailable || desktop.modelsLoading) return;
     closeThinking(kind === 'thinking');
     const runtime = desktop.runtimeId;
     const session = desktop.snapshot.sessionFile;
@@ -161,9 +175,10 @@
       loading={desktop.modelsLoading}
       error={desktop.modelsError}
       onretry={() => void desktop.refreshModels()}
+      onconfigure={onsettings}
       current={desktop.selectedModel}
       disabled={unavailable}
-      connecting={desktop.connection === 'starting'}
+      connecting={desktop.connection === 'starting' || desktop.preparing}
       onselect={(key) => void change('model', key)}
     />
     <div
@@ -183,7 +198,7 @@
         aria-haspopup="menu"
         aria-expanded={thinkingOpen}
         title={`思考强度：${levelInfo(currentLevel).name}（${currentLevel}）`}
-        disabled={unavailable || levels.length < 2}
+        disabled={unavailable || desktop.modelsLoading || levels.length < 2}
         onclick={() => (thinkingOpen ? closeThinking() : void openThinking())}
         onkeydown={(event) => {
           if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {

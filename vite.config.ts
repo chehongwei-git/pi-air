@@ -15,6 +15,8 @@ export default defineConfig(({ mode }) => ({
   server: {
     port: 1420,
     strictPort: true,
+    // 浏览器验收使用固定源码；关闭 HMR，避免 WebSocket 短暂断连触发整页重载并截断输入事务。
+    hmr: mode === 'browser-test' ? false : undefined,
     // 提前转换主页面依赖，避免首次浏览器用例与 Svelte 冷编译争用启动时间。
     warmup: { clientFiles: ['src/main.ts'] },
   },

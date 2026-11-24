@@ -5,6 +5,26 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import Composer from './Composer.svelte';
 afterEach(cleanup);
 describe('composer', () => {
+  it('准备阶段允许编辑和添加附件，但按钮与回车均不发送', async () => {
+    const onsend = vi.fn();
+    const view = render(Composer, {
+      value: '连接期间的草稿',
+      sendUnavailable: true,
+      onsend,
+      onstop: vi.fn(),
+    });
+    const input = view.getByRole('textbox');
+    expect(input).toBeEnabled();
+    expect(view.getByRole('button', { name: '添加文件' })).toBeEnabled();
+    expect(view.getByRole('button', { name: '发送消息' })).toBeDisabled();
+    await fireEvent.input(input, { target: { value: '继续编辑' } });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onsend).not.toHaveBeenCalled();
+    expect(input).toHaveValue('继续编辑');
+    await view.rerender({ sendUnavailable: false });
+    await fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onsend).toHaveBeenCalledOnce();
+  });
   it('shows executable builtins and discovered commands, with keyboard completion and dismissal', async () => {
     const onsend = vi.fn();
     const view = render(Composer, {

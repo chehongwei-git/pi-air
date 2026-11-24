@@ -1,6 +1,6 @@
 <!-- 设置在主内容区编辑，具体生效时机在对应分类内说明。 -->
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { open } from '@tauri-apps/plugin-dialog';
   import Icon from './Icon.svelte';
   import ModelSettings from './ModelSettings.svelte';
@@ -10,10 +10,12 @@
   let {
     desktop,
     onclose,
+    initialSection = 'appearance',
     unsaved = $bindable(false),
   }: {
     desktop: Desktop;
     onclose: () => void;
+    initialSection?: 'appearance' | 'connection' | 'models' | 'storage';
     unsaved?: boolean;
   } = $props();
   // 只在进入设置时取快照，避免外部刷新覆盖编辑中的草稿。
@@ -24,9 +26,10 @@
   }
   let form = $state(structuredClone(seed));
   let paths = $state(seed.extraPath.join('\n'));
-  let section = $state('appearance');
+  // 分类入口只在打开时生效，避免外部状态覆盖设置页内的自主导航。
+  let section = $state<string>(untrack(() => initialSection));
   let modelsPage = $state<ModelSettings>();
-  let modelsVisited = $state(false);
+  let modelsVisited = $state(untrack(() => initialSection === 'models'));
   let modelsDirty = $state(false);
   let modelsBusy = $state(false);
   let busy = $state<'detect' | 'save' | null>(null);

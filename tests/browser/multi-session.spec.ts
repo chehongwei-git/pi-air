@@ -167,7 +167,7 @@ test('two projects keep independent sessions, queues, drafts and background inte
           const state = {
             sessionFile: path,
             cwd: args.project,
-            sessionName: catalog.find((s) => s.path === path)?.name ?? 'new',
+            sessionName: catalog.find((s) => s.path === path)?.name,
             model: { provider: 'mock', id: 'm', name: 'Mock' },
             thinkingLevel: 'off',
             isStreaming: false,
@@ -179,17 +179,19 @@ test('two projects keep independent sessions, queues, drafts and background inte
             index: 0,
             pending: [],
             sequence: 0,
-            messages: [
-              {
-                id: `${id}-u`,
-                role: 'user',
-                text: `history ${state.sessionName}`,
-                thinking: '',
-                status: 'done',
-                contentRef: null,
-                name: null,
-              },
-            ],
+            messages: args.sessionPath
+              ? [
+                  {
+                    id: `${id}-u`,
+                    role: 'user',
+                    text: `history ${state.sessionName}`,
+                    thinking: '',
+                    status: 'done',
+                    contentRef: null,
+                    name: null,
+                  },
+                ]
+              : [],
           });
           return {
             runtimeId: id,
@@ -217,26 +219,29 @@ test('two projects keep independent sessions, queues, drafts and background inte
             const task = {
               taskId: `task-${tasks.length}`,
               runtimeId: r.id,
-              state: 'running',
-              position: 0,
+              state: 'queued',
+              position: 1,
             };
             tasks.push(task);
-            r.state.isStreaming = true;
-            wake(r, [
-              { type: 'run', state: 'running' },
-              {
-                type: 'message',
-                message: {
-                  id: `${r.id}-send`,
-                  role: 'user',
-                  text: a.message,
-                  thinking: '',
-                  status: 'done',
-                  contentRef: null,
-                  name: null,
+            launches.set(task.taskId, () => {
+              r.state.isStreaming = true;
+              wake(r, [
+                { type: 'run', state: 'running' },
+                {
+                  type: 'message',
+                  message: {
+                    id: `${r.id}-send`,
+                    role: 'user',
+                    text: a.message,
+                    thinking: '',
+                    status: 'done',
+                    contentRef: null,
+                    name: null,
+                  },
                 },
-              },
-            ]);
+              ]);
+            });
+            setTimeout(startNext, 0);
             return { desktopTask: task.taskId };
           }
           if (a.type === 'stop') {
@@ -324,6 +329,7 @@ test('two projects keep independent sessions, queues, drafts and background inte
     .getByRole('button', { name: '新对话', exact: false })
     .first()
     .click();
+  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
   await page.locator('.composer textarea').fill('fifth queued prompt');
   const countBefore = await page.evaluate(() => (window as any).spawnCount);
   await page.locator('.composer textarea').press('Enter');
@@ -346,8 +352,9 @@ test('two projects keep independent sessions, queues, drafts and background inte
   await expect(page.locator('.transcript:visible')).toContainText(
     'fifth queued prompt',
   );
+  // 第五个会话已经预热；队列开始只提交消息，不再启动第二个进程。
   expect(await page.evaluate(() => (window as any).spawnCount)).toBe(
-    countBefore + 1,
+    countBefore,
   );
   await page.evaluate(() => {
     (window as any).finishSession('A2');

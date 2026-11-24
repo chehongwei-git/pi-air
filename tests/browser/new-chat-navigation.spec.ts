@@ -53,18 +53,32 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
       modified: 0,
       warning: null,
     }));
-    const snapshot = () => ({ sessionFile, cwd, isStreaming: false });
+    const runtimeSessions = new Map<string, string>();
+    const channels = new Map<
+      string,
+      { callback: (event: unknown) => void; index: number }
+    >();
+    const callbacks = new Map<number, (event: unknown) => void>();
+    const pending = new Map<string, any[]>();
+    let serial = 0;
+    let callbackId = 0;
+    function wake(runtimeId: string) {
+      const channel = channels.get(runtimeId)!;
+      channel.callback({
+        index: channel.index++,
+        message: { type: 'available', runtimeId },
+      });
+    }
+    const snapshot = (runtimeId = 'runtime') => ({
+      sessionFile: runtimeSessions.get(runtimeId) ?? sessionFile,
+      cwd,
+      isStreaming: false,
+    });
     (window as any).planControls = [];
     (window as any).__TAURI_INTERNALS__ = {
       transformCallback: (callback: (event: unknown) => void) => {
-        // Channel 按 index 去重，连续唤醒必须使用递增序号。
-        let index = 0;
-        (window as any).wakeExtensions = () =>
-          callback({
-            index: index++,
-            message: { type: 'available', runtimeId: 'runtime' },
-          });
-        return 1;
+        callbacks.set(++callbackId, callback);
+        return callbackId;
       },
       unregisterCallback: () => {},
       async invoke(command: string, args: any = {}) {
@@ -78,23 +92,42 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
         }
         if (command === 'sync_process_pool') return;
         if (command === 'connect_pi') {
-          sessionFile = args.sessionPath ?? 'original.jsonl';
+          const runtimeId = args.sessionPath
+            ? `runtime-${args.sessionPath}`
+            : serial++ === 0
+              ? 'runtime'
+              : `runtime-new-${serial}`;
+          runtimeSessions.set(
+            runtimeId,
+            args.sessionPath ??
+              (runtimeId === 'runtime'
+                ? 'original.jsonl'
+                : `new-${serial}.jsonl`),
+          );
+          channels.set(runtimeId, {
+            callback: callbacks.get(args.channel.id)!,
+            index: 0,
+          });
+          (window as any).wakeExtensions = () => wake('runtime');
           return {
-            runtimeId: args.sessionPath
-              ? `runtime-${args.sessionPath}`
-              : 'runtime',
+            runtimeId,
             project: cwd,
-            snapshot: snapshot(),
+            snapshot: snapshot(runtimeId),
             version: '1.4.0',
             verified: true,
           };
         }
         if (command === 'next_events') {
-          const events = extensionEvents;
-          extensionEvents = [];
+          const events = [
+            ...(args.runtimeId === 'runtime' ? extensionEvents : []),
+            ...(pending.get(args.runtimeId) ?? []),
+          ];
+          if (args.runtimeId === 'runtime') extensionEvents = [];
+          pending.delete(args.runtimeId);
           return { runtimeId: args.runtimeId, sequence: 1, events };
         }
         if (command === 'perform') {
+          sessionFile = runtimeSessions.get(args.runtimeId) ?? sessionFile;
           switch (args.action.type) {
             case 'new_session':
               sessionFile = 'new.jsonl';
@@ -102,27 +135,47 @@ test('returns from a new-chat draft to existing sessions', async ({ page }) => {
             case 'prompt':
               if (args.action.message.startsWith('/todos '))
                 (window as any).planControls.push(args.action.message);
+              else {
+                pending.set(args.runtimeId, [
+                  {
+                    type: 'message',
+                    message: {
+                      id: `sent-${args.runtimeId}`,
+                      role: 'user',
+                      text: args.action.message,
+                      thinking: '',
+                      status: 'done',
+                      contentRef: null,
+                      name: null,
+                    },
+                  },
+                ]);
+                setTimeout(() => wake(args.runtimeId), 0);
+              }
               return {};
             case 'switch_session':
               // A switch hook may cancel a redundant restore of the active session.
               if (sessionFile === args.action.path) return { cancelled: true };
               sessionFile = args.action.path;
+              runtimeSessions.set(args.runtimeId, sessionFile);
               return { cancelled: false };
             case 'state':
-              return snapshot();
+              return snapshot(args.runtimeId);
             case 'history':
               return {
-                messages: [
-                  {
-                    id: sessionFile,
-                    role: 'user',
-                    text: `History: ${sessionFile}`,
-                    thinking: '',
-                    status: 'done',
-                    contentRef: null,
-                    name: null,
-                  },
-                ],
+                messages: sessionFile.startsWith('new-')
+                  ? []
+                  : [
+                      {
+                        id: sessionFile,
+                        role: 'user',
+                        text: `History: ${sessionFile}`,
+                        thinking: '',
+                        status: 'done',
+                        contentRef: null,
+                        name: null,
+                      },
+                    ],
                 before: 0,
                 hasMore: false,
               };

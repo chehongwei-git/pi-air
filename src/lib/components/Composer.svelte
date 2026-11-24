@@ -31,6 +31,7 @@
     attachments = $bindable<DraftAttachment[]>([]),
     active = true,
     disabled = false,
+    sendUnavailable = false,
     running = false,
     submitting = false,
     commands = [],
@@ -54,6 +55,8 @@
     attachments?: DraftAttachment[];
     active?: boolean;
     disabled?: boolean;
+    /** 准备阶段只阻止发送，保留文字及附件编辑。 */
+    sendUnavailable?: boolean;
     running?: boolean;
     submitting?: boolean;
     commands?: Command[];
@@ -414,6 +417,7 @@
   }
   /** 模式在按钮与提示中明确表达；提交期间阻止重复请求。 */
   function submit(mode?: 'steer' | 'followUp'): void {
+    if (sendUnavailable) return;
     if (menu) {
       complete(selected, true);
       return;
@@ -700,6 +704,7 @@
           class="text-button"
           title="排在当前任务完成后处理"
           disabled={disabled ||
+            sendUnavailable ||
             submitting ||
             fileBusy ||
             (!value.trim() && !attachments.length)}
@@ -719,6 +724,7 @@
         aria-label={running ? '发送引导' : '发送消息'}
         title={running ? '发送引导，在下一个可处理节点生效' : '发送消息'}
         disabled={disabled ||
+          sendUnavailable ||
           (!menu && !value.trim() && !attachments.length) ||
           submitting ||
           fileBusy ||

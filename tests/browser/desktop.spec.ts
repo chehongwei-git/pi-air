@@ -180,6 +180,10 @@ async function mock(
             return { desktopTask: 'task-' + runtime.id, runtimeId: runtime.id };
           }
           if (command === 'connect_pi') {
+            if (host.failConnectionOnce) {
+              host.failConnectionOnce = false;
+              throw new Error('找不到 Pi，请检查启动路径');
+            }
             if (host.deferConnection)
               await new Promise<void>((resolve) => {
                 host.releaseConnection = resolve;
@@ -264,6 +268,7 @@ async function mock(
                 runtime.sessionFile = args.action.path;
                 return { cancelled: false };
               case 'models':
+                if (host.failModels) throw new Error('模型目录暂时不可读');
                 return {
                   models: [{ provider: 'mock', id: 'model', name: 'Mock' }],
                 };
@@ -1325,7 +1330,7 @@ test('creating a session in another project never remounts the old long transcri
     (window as any).originalTranscript = node;
   });
   await page.evaluate(() => {
-    (window as any).deferTaskStart = true;
+    (window as any).deferPrompt = true;
     (window as any).historyMessages = [];
   });
   await page
@@ -1334,9 +1339,15 @@ test('creating a session in another project never remounts the old long transcri
   await expect(page.locator('.welcome p')).toHaveText('C:/work/beta');
   await expect(transcript).toHaveCount(0);
   const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
   await input.fill('首条消息');
   await input.press('Enter');
-  // 当前实现先展示已接受的用户消息，再等待原生任务初始化；旧会话始终隐藏。
+  await expect
+    .poll(() => page.evaluate(() => typeof (window as any).releasePrompt))
+    .toBe('function');
+  // 等待提交期间仍隐藏原会话，保持它的 DOM 身份和阅读窗口。
+  await expect(page.locator('.transcript:visible')).toHaveCount(0);
+  await page.evaluate(() => (window as any).releasePrompt());
   await expect(
     page
       .getByRole('region', { name: '对话消息' })
@@ -1345,10 +1356,6 @@ test('creating a session in another project never remounts the old long transcri
   await expect(
     page.getByRole('region', { name: '对话消息' }),
   ).not.toContainText('这是模拟正文');
-  await expect
-    .poll(() => page.evaluate(() => typeof (window as any).releaseTaskStart))
-    .toBe('function');
-  await page.evaluate(() => (window as any).releaseTaskStart());
   await expect(
     page
       .getByRole('region', { name: '对话消息' })
@@ -1361,7 +1368,7 @@ test('creating a session in another project never remounts the old long transcri
           (call: any) => call.command === 'submit_new_task',
         ).length,
     ),
-  ).toBe(1);
+  ).toBe(0);
   await recent.locator('.history-item').filter({ hasText: '修复登录' }).click();
   await expect(transcript).toBeVisible();
   expect(
@@ -1377,8 +1384,8 @@ test('new conversation without a project starts in the user directory', async ({
   await mock(page, 0);
   await page.goto('/');
   await page.locator('.nav-new').click();
-  // 新草稿延迟启动进程。
-  await expect(page.getByText('已连接', { exact: true })).toHaveCount(0);
+  // 已知用户目录的新对话同样自动准备，重访未发送草稿复用实例。
+  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
   await expect(page.locator('.welcome p')).toHaveText('C:/Users/mock');
   await expect(
     page.getByRole('textbox', { name: '消息输入', exact: true }),
@@ -1399,7 +1406,7 @@ test('new conversation without a project starts in the user directory', async ({
     calls
       .filter((c: any) => c.command === 'connect_pi')
       .map((c: any) => c.project),
-  ).toEqual(['']);
+  ).toEqual(['', 'C:/Users/mock']);
   expect(
     calls.filter((c: any) => c.command === 'plugin:dialog|open'),
   ).toHaveLength(0);
@@ -1684,13 +1691,138 @@ test('new conversation project picker searches all projects and supports new dir
     calls
       .filter((c: any) => c.command === 'connect_pi')
       .map((c: any) => c.project),
-  ).toEqual(['']);
+  ).toEqual(['', 'C:/Users/mock', 'C:/work/beta', 'C:/mock/project']);
   await picker.click();
   await page.screenshot({ path: 'test-results/project-picker-light.png' });
   await page.evaluate(() => {
     document.documentElement.dataset.theme = 'dark';
   });
   await page.screenshot({ path: 'test-results/project-picker-dark.png' });
+});
+
+test('冷启动直接新建项目会自动准备，慢连接期间保留输入和布局', async ({
+  page,
+}) => {
+  await mock(page, 0, true);
+  await page.addInitScript(() => {
+    (window as any).failConnectionOnce = true;
+    (window as any).deferConnection = true;
+  });
+  await page.goto('/');
+  await expect(page.getByText('连接失败', { exact: true })).toBeVisible();
+  await page.locator('.nav-new').click();
+  const picker = page.getByRole('button', {
+    name: '选择新对话项目',
+    exact: true,
+  });
+  await picker.click();
+  await page.getByRole('button', { name: /新建项目/ }).click();
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await expect(page.getByText('正在准备 Pi', { exact: true })).toBeVisible();
+  await expect(input).toBeEnabled();
+  await input.fill('连接期间继续编辑');
+  await expect(
+    page.getByRole('button', { name: '添加文件', exact: true }),
+  ).toBeEnabled();
+  await expect(
+    page.getByRole('button', { name: '发送消息', exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole('button', { name: '模型', exact: true }),
+  ).toBeDisabled();
+  const before = await input.boundingBox();
+  await input.press('Enter');
+  await expect(input).toHaveValue('连接期间继续编辑');
+  await expect
+    .poll(() => page.evaluate(() => typeof (window as any).releaseConnection))
+    .toBe('function');
+  await page.screenshot({
+    path: 'test-results/new-project-preparing-light.png',
+  });
+  await page.evaluate(() => {
+    (window as any).deferConnection = false;
+    (window as any).releaseConnection();
+  });
+  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
+  await expect(input).toHaveValue('连接期间继续编辑');
+  const after = await input.boundingBox();
+  expect(after?.y).toBeCloseTo(before!.y, 0);
+  await page.getByRole('button', { name: '模型', exact: true }).click();
+  await expect(
+    page.getByRole('region', { name: '选择模型', exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(
+    page.getByRole('button', { name: '模型', exact: true }),
+  ).toBeFocused();
+  const calls = await page.evaluate(() => (window as any).ipcCalls);
+  expect(
+    calls.filter(
+      (call: any) =>
+        call.command === 'submit_new_task' || call.action?.type === 'prompt',
+    ),
+  ).toHaveLength(0);
+  await page.setViewportSize({ width: 520, height: 800 });
+  await page.evaluate(() => {
+    document.documentElement.dataset.theme = 'dark';
+  });
+  await page.screenshot({ path: 'test-results/new-project-ready-dark.png' });
+  await input.press('Enter');
+  await expect(input).toHaveValue('');
+  const sent = await page.evaluate(() => (window as any).ipcCalls);
+  expect(
+    sent.filter((call: any) => call.command === 'submit_new_task'),
+  ).toHaveLength(0);
+  expect(
+    sent.filter((call: any) => call.action?.type === 'prompt'),
+  ).toHaveLength(1);
+});
+
+test('新项目目录读取失败可就地重试，连接成功且草稿不丢失', async ({ page }) => {
+  await mock(page, 0, true);
+  await page.addInitScript(() => {
+    (window as any).failConnectionOnce = true;
+  });
+  await page.goto('/');
+  await expect(page.getByText('连接失败', { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    (window as any).failModels = true;
+  });
+  await page.locator('.nav-new').click();
+  await page
+    .getByRole('button', { name: '选择新对话项目', exact: true })
+    .click();
+  await page.getByRole('button', { name: /新建项目/ }).click();
+  await expect(page.getByText('已连接', { exact: true })).toBeVisible();
+  const input = page.getByRole('textbox', { name: '消息输入', exact: true });
+  await input.fill('目录错误仍保留');
+  await page.getByRole('button', { name: '模型', exact: true }).click();
+  await expect(
+    page.getByRole('alert').filter({ hasText: '模型目录暂时不可读' }),
+  ).toBeVisible();
+  const before = await page.evaluate(
+    () =>
+      (window as any).ipcCalls.filter(
+        (call: any) => call.command === 'connect_pi',
+      ).length,
+  );
+  await page.evaluate(() => {
+    (window as any).failModels = false;
+  });
+  await page.getByRole('button', { name: '重试加载模型', exact: true }).click();
+  await expect(
+    page.getByRole('textbox', { name: '搜索模型', exact: true }),
+  ).toBeFocused();
+  await expect(page.getByText('1 个模型', { exact: true })).toBeVisible();
+  await expect(input).toHaveValue('目录错误仍保留');
+  expect(
+    await page.evaluate(
+      () =>
+        (window as any).ipcCalls.filter(
+          (call: any) => call.command === 'connect_pi',
+        ).length,
+    ),
+  ).toBe(before);
 });
 
 test('welcome, project, conversation, send and shortcuts', async ({ page }) => {

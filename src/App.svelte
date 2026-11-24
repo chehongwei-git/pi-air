@@ -181,6 +181,9 @@
     )?.focus({ preventScroll: true });
   }
   let settingsOpen = $state(false);
+  let settingsSection = $state<'appearance' | 'connection' | 'models'>(
+    'appearance',
+  );
   let settingsVisible = $derived(
     settingsOpen || desktop.builtinRequest?.name === 'settings',
   );
@@ -220,6 +223,7 @@
         ? document.activeElement
         : null;
     sidebarCollection = null;
+    settingsSection = 'appearance';
     settingsOpen = true;
     sidebar = window.innerWidth > 900;
   }
@@ -1272,6 +1276,7 @@
           <Page
             bind:this={settingsPage}
             {desktop}
+            initialSection={settingsSection}
             bind:unsaved={settingsUnsaved}
             onclose={() => void closeSettings()}
           />
@@ -1335,15 +1340,21 @@
           {@render notices(true)}
           <span
             class="connection"
-            class:connected={desktop.connection === 'ready'}
-            ><span class="status-dot"></span>{desktop.connectionPhase ||
-              (desktop.restoring || desktop.connection === 'starting'
-                ? '准备中'
-                : desktop.connection === 'ready'
-                  ? '已连接'
-                  : desktop.connection === 'failed'
-                    ? '连接失败'
-                    : '未连接')}</span
+            role="status"
+            class:connected={desktop.connection === 'ready' &&
+              !desktop.preparing}
+            ><span class="status-dot"></span>{desktop.preparing
+              ? '正在准备 Pi'
+              : desktop.connectionPhase ||
+                (desktop.restoring || desktop.connection === 'starting'
+                  ? '准备中'
+                  : desktop.connection === 'ready'
+                    ? '已连接'
+                    : desktop.connection === 'failed'
+                      ? '连接失败'
+                      : desktop.newChatProject !== null && !displayProject
+                        ? '选择项目后开始'
+                        : '未连接')}</span
           >
           <div class="session-menu-wrap">
             <button
@@ -1408,13 +1419,28 @@
                   onclick={chooseProject}
                   ><Icon name="folder" size={18} />选择项目文件夹</button
                 >{/if}
-              <!-- 新草稿在首次发送时自动连接；未分配运行实例不代表连接故障。 -->
-              {#if displayProject && desktop.newChatProject === null && (desktop.connection === 'disconnected' || desktop.connection === 'failed')}<button
-                  class="choose-project"
-                  onclick={() => {
-                    void desktop.connect(desktop.project);
-                  }}>连接 Pi</button
-                >{/if}
+              <!-- 主动新建自动准备；失败保留输入，并在当前页面重试。 -->
+              {#if displayProject && !desktop.preparing && (desktop.connection === 'disconnected' || desktop.connection === 'failed') && (desktop.newChatProject === null || desktop.preparationRequested)}<div
+                  class="project-connection-actions"
+                >
+                  {#if desktop.error}<p role="alert">{desktop.error}</p>{/if}
+                  <button
+                    class="choose-project"
+                    onclick={() => {
+                      void desktop.guard(() => workspace.ensure(desktop));
+                    }}
+                    >{desktop.connection === 'failed'
+                      ? '重试连接'
+                      : '连接 Pi'}</button
+                  >
+                  <button
+                    class="text-button"
+                    onclick={() => {
+                      openSettings();
+                      settingsSection = 'connection';
+                    }}>Pi 连接设置</button
+                  >
+                </div>{/if}
             </div>
           {/if}
           {#each workspace.retained as session (session)}
@@ -1596,7 +1622,7 @@
                 projects={workspace.projects}
                 project={displayProject}
                 disabled={!!desktop.openingSession ||
-                  desktop.connection === 'starting'}
+                  (!desktop.preparing && desktop.connection === 'starting')}
                 onselect={selectNewProject}
                 oncreate={() => {
                   void createNewProject();
@@ -1605,6 +1631,10 @@
             {/if}
             {#key desktop}<CommandComposer
                 {desktop}
+                onsettings={() => {
+                  openSettings();
+                  settingsSection = 'models';
+                }}
                 active={!locationProject &&
                   !settingsVisible &&
                   !pluginsOpen &&

@@ -21,6 +21,25 @@ function fixture() {
 }
 
 describe('composer model controls', () => {
+  it('准备时禁用切换，成功空目录可就地进入模型设置并恢复入口焦点', async () => {
+    const { desktop } = fixture();
+    desktop.models = [];
+    desktop.snapshot = {};
+    desktop.preparing = true;
+    const onsettings = vi.fn();
+    const view = render(ModelControls, { desktop, onsettings });
+    const trigger = view.getByRole('button', { name: '模型' });
+    expect(trigger).toBeDisabled();
+    desktop.preparing = false;
+    await waitFor(() => expect(trigger).toBeEnabled());
+    await fireEvent.click(trigger);
+    await fireEvent.click(
+      view.getByRole('button', { name: '配置模型与服务商' }),
+    );
+    expect(onsettings).toHaveBeenCalledOnce();
+    expect(trigger).toHaveFocus();
+    expect(desktop.draft).toBe('保留草稿');
+  });
   it('shows loading and inline retry without hiding the current model or losing the draft', async () => {
     const { desktop } = fixture();
     desktop.models = [];

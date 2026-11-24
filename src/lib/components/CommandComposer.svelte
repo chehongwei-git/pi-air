@@ -10,10 +10,12 @@
     desktop,
     active = true,
     onsend,
+    onsettings,
   }: {
     desktop: Desktop;
     active?: boolean;
     onsend: (mode?: 'steer' | 'followUp') => void;
+    onsettings?: () => void;
   } = $props();
   type Page =
     | 'settings'
@@ -345,8 +347,12 @@
   onhistory={(before) => desktop.promptHistory(before)}
   onhistorytext={(message) => desktop.promptText(message)}
   disabled={!!desktop.openingSession ||
-    (!desktop.historyCached &&
+    (!desktop.preparing &&
+      !desktop.historyCached &&
       ['starting', 'stopping'].includes(desktop.connection))}
+  sendUnavailable={desktop.preparing ||
+    (desktop.preparationRequested &&
+      (desktop.connection === 'failed' || !!desktop.modelsError))}
   running={desktop.run !== 'idle'}
   submitting={!!desktop.messageEdit ||
     desktop.submitting ||
@@ -354,7 +360,8 @@
     modelChanging ||
     busy ||
     loading ||
-    (!desktop.historyCached &&
+    (!desktop.preparationRequested &&
+      !desktop.historyCached &&
       desktop.connection !== 'ready' &&
       desktop.newChatProject === null) ||
     desktop.task?.state === 'queued'}
@@ -388,6 +395,7 @@
   {#snippet controls()}
     <ModelControls
       {desktop}
+      {onsettings}
       bind:busy={modelChanging}
       disabled={busy ||
         loading ||

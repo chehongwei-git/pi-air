@@ -167,6 +167,259 @@ function summary(path: string, cwd: string): SessionSummary {
     warning: null,
   };
 }
+describe('主动新建项目自动准备', () => {
+  it('冷启动失败后仍独立准备新项目，首条发送复用实例和所选模型', async () => {
+    const { workspace, api, action } = fixture();
+    const connect = vi.spyOn(api, 'connect');
+    connect.mockRejectedValueOnce(new Error('启动连接失败'));
+    await workspace.init();
+    const submit = vi.spyOn(api, 'submitNew');
+    const draft = workspace.prepareDraft('/fresh');
+    draft.draft = '第一条消息';
+    expect(draft.preparing).toBe(true);
+    expect(draft.openingSession).toBeNull();
+    await workspace.ensure(draft);
+    expect(draft.connection).toBe('ready');
+    expect(draft.models.map((model) => model.id)).toEqual(['a', 'b']);
+    expect(draft.draft).toBe('第一条消息');
+    expect(
+      action.mock.calls.some(([, command]) => command.type === 'prompt'),
+    ).toBe(false);
+    await draft.setModel('mock/b');
+    await draft.setThinking('high');
+    const runtime = draft.runtimeId;
+    await draft.send();
+    expect(submit).not.toHaveBeenCalled();
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(draft.runtimeId).toBe(runtime);
+    expect(draft.selectedModel?.id).toBe('b');
+    expect(draft.selectedThinking).toBe('high');
+    expect(
+      action.mock.calls.filter(([, command]) => command.type === 'prompt'),
+    ).toHaveLength(1);
+  });
+
+  it('准备中重复选择合并连接，迟到结果不抢项目，保留期间输入与附件', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const original = api.connect;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const connect = vi
+      .spyOn(api, 'connect')
+      .mockImplementation(async (...args) => {
+        if (args[0] === '/slow') await gate;
+        return original(...args);
+      });
+    const slow = workspace.prepareDraft('/slow');
+    slow.draft = '连接期间输入';
+    const attachments = slow.attachments;
+    expect(workspace.prepareDraft('/slow')).toBe(slow);
+    const pending = workspace.ensure(slow);
+    expect(workspace.ensure(slow)).toBe(pending);
+    const other = workspace.prepareDraft('/other');
+    await workspace.ensure(other);
+    release();
+    await pending;
+    expect(workspace.active).toBe(other);
+    expect(slow.draft).toBe('连接期间输入');
+    expect(slow.attachments).toBe(attachments);
+    expect(slow.openingSession).toBeNull();
+    expect(
+      connect.mock.calls.filter(([project]) => project === '/slow'),
+    ).toHaveLength(1);
+  });
+
+  it('重访已准备但未发送的草稿保留对象、选择和输入，不重复启动', async () => {
+    const { workspace, api } = fixture();
+    await workspace.init();
+    const source = workspace.active;
+    const connect = vi.spyOn(api, 'connect');
+    const draft = workspace.prepareDraft('/prepared');
+    await workspace.ensure(draft);
+    await draft.setModel('mock/b');
+    draft.draft = '已准备的草稿';
+    workspace.select(source);
+    expect(workspace.prepareDraft('/prepared')).toBe(draft);
+    await workspace.ensure(draft);
+    expect(draft.draft).toBe('已准备的草稿');
+    expect(draft.selectedModel?.id).toBe('b');
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('首次发送等待准备完成，不另建会话或自动重发', async () => {
+    const { workspace, api, action } = fixture();
+    await workspace.init();
+    const original = api.connect;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(api, 'connect').mockImplementation(async (...args) => {
+      await gate;
+      return original(...args);
+    });
+    const submit = vi.spyOn(api, 'submitNew');
+    const draft = workspace.prepareDraft('/slow');
+    draft.draft = '等待后发送';
+    const sending = draft.send();
+    expect(
+      action.mock.calls.some(([, command]) => command.type === 'prompt'),
+    ).toBe(false);
+    release();
+    await sending;
+    expect(submit).not.toHaveBeenCalled();
+    expect(
+      action.mock.calls.filter(([, command]) => command.type === 'prompt'),
+    ).toHaveLength(1);
+  });
+
+  it('连接失败保留草稿，手动重试不自动发送', async () => {
+    const { workspace, api, action } = fixture();
+    await workspace.init();
+    vi.spyOn(api, 'connect').mockRejectedValueOnce(new Error('找不到 Pi'));
+    const draft = workspace.prepareDraft('/retry');
+    draft.draft = '不要丢失';
+    await expect(workspace.ensure(draft)).rejects.toThrow('找不到 Pi');
+    expect(draft.preparing).toBe(false);
+    expect(draft.connection).toBe('failed');
+    expect(draft.draft).toBe('不要丢失');
+    await expect(draft.send()).rejects.toThrow('找不到 Pi');
+    await workspace.ensure(draft);
+    expect(draft.error).toBe('');
+    expect(draft.connection).toBe('ready');
+    expect(draft.draft).toBe('不要丢失');
+    expect(
+      action.mock.calls.some(([, command]) => command.type === 'prompt'),
+    ).toBe(false);
+  });
+
+  it('模型目录失败不误报连接故障，可单独刷新并完成原模型应用', async () => {
+    const { workspace, action } = fixture();
+    await workspace.init();
+    await workspace.active.setModel('mock/b');
+    const original = action.getMockImplementation()!;
+    action.mockImplementation(async (...args) => {
+      if (args[1].type === 'models') throw new Error('目录读取失败');
+      return original(...args);
+    });
+    const draft = workspace.prepareDraft('/catalog');
+    draft.draft = '保留输入';
+    await workspace.ensure(draft);
+    expect(draft.connection).toBe('ready');
+    expect(draft.modelsError).toBe('目录读取失败');
+    await expect(draft.send()).rejects.toThrow('目录读取失败');
+    const runtime = draft.runtimeId;
+    action.mockImplementation(original);
+    await draft.refreshModels();
+    expect(draft.runtimeId).toBe(runtime);
+    expect(draft.modelsError).toBe('');
+    expect(draft.selectedModel?.id).toBe('b');
+    expect(draft.draft).toBe('保留输入');
+  });
+
+  it('失效模型允许显式改选后恢复准备，旧选择不覆盖新选择', async () => {
+    const { workspace } = fixture();
+    await workspace.init();
+    workspace.active.settings.projectModels = [
+      {
+        project: '/invalid',
+        provider: 'mock',
+        model: 'deleted',
+        thinkingLevel: 'off',
+      },
+    ];
+    const draft = workspace.prepareDraft('/invalid');
+    draft.draft = '模型失效仍保留';
+    await expect(workspace.ensure(draft)).rejects.toThrow('所选模型已不可用');
+    await draft.setModel('mock/b');
+    expect(draft.connection).toBe('ready');
+    expect(draft.selectedModel?.id).toBe('b');
+    expect(draft.draft).toBe('模型失效仍保留');
+  });
+
+  it('来源启动目录迟到不会覆盖已准备项目自己的模型目录', async () => {
+    const { workspace, action, states } = fixture();
+    const original = action.getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    action.mockImplementation(async (...args) => {
+      if (args[1].type !== 'models') return original(...args);
+      const startup = !states.get(args[0])?.cwd;
+      if (startup) await gate;
+      return {
+        models: [
+          {
+            provider: 'mock',
+            id: startup ? 'startup-only' : 'project-only',
+            name: startup ? 'Startup' : 'Project',
+          },
+        ],
+      };
+    });
+    const initializing = workspace.init();
+    await vi.waitFor(() => expect(workspace.active.modelsLoading).toBe(true));
+    const draft = workspace.prepareDraft('/own-catalog');
+    await workspace.ensure(draft);
+    expect(draft.models[0].id).toBe('project-only');
+    release();
+    await initializing;
+    expect(draft.models[0].id).toBe('project-only');
+    expect(workspace.active).toBe(draft);
+  });
+
+  it('启动设置尚未返回时选目录仍创建独立草稿，不被初始化连接覆盖', async () => {
+    const { workspace, api } = fixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    api.settings = async () => {
+      await gate;
+      return structuredClone(defaultSettings);
+    };
+    const initial = workspace.active;
+    const initializing = workspace.init();
+    await initial.connect('/early-choice');
+    const chosen = workspace.active;
+    expect(chosen).not.toBe(initial);
+    chosen.draft = '初始化期间选目录';
+    release();
+    await initializing;
+    expect(workspace.active).toBe(chosen);
+    expect(chosen.project).toBe('/early-choice');
+    expect(chosen.draft).toBe('初始化期间选目录');
+  });
+
+  it('启动连接迟到不激活或覆盖用户已选择的新项目', async () => {
+    const { workspace, api } = fixture();
+    const original = api.connect;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(api, 'connect').mockImplementation(async (...args) => {
+      if (!args[0]) await gate;
+      return original(...args);
+    });
+    const initializing = workspace.init();
+    await vi.waitFor(() => expect(api.connect).toHaveBeenCalled());
+    workspace.active.prepareNewChat('/chosen');
+    const chosen = workspace.active;
+    chosen.draft = '独立新草稿';
+    await workspace.ensure(chosen);
+    release();
+    await initializing;
+    expect(workspace.active).toBe(chosen);
+    expect(chosen.project).toBe('/chosen');
+    expect(chosen.draft).toBe('独立新草稿');
+  });
+});
+
 describe('cross-project workspace', () => {
   it('absorbs duplicate project identities without replacing either draft or the selected reading view', async () => {
     const { workspace, api } = fixture();

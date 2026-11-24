@@ -1144,6 +1144,8 @@ button svg {
   justify-content: space-between;
   gap: 8px 16px;
   flex-wrap: wrap;
+  /* 预留用量按钮的行高，连接就绪后出现统计也不抬升输入框。 */
+  min-height: 24px;
   font-size: 12px;
   color: var(--muted);
   margin: 10px 0 0;
@@ -1324,6 +1326,20 @@ button svg {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* 连接失败操作留在欢迎区，长路径及错误自然换行，不改变底部输入位置。 */
+.project-connection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.welcome .project-connection-actions p {
+  flex-basis: 100%;
+  color: var(--error);
+  overflow-wrap: anywhere;
 }
 .extension-status,
 .queue-hint {

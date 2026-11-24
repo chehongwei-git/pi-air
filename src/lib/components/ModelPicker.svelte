@@ -12,6 +12,7 @@
     loading = false,
     error = '',
     onretry,
+    onconfigure,
     onselect,
   }: {
     models: Model[];
@@ -21,6 +22,7 @@
     loading?: boolean;
     error?: string;
     onretry?: () => void;
+    onconfigure?: () => void;
     onselect: (key: string) => void;
   } = $props();
   let expanded = $state(false);
@@ -72,6 +74,7 @@
     input?.focus();
   }
   function select(model: Model) {
+    if (loading) return;
     close(true);
     if (!current || key(model) !== key(current)) onselect(key(model));
   }
@@ -149,7 +152,7 @@
     <span class="trigger-name"
       >{current?.name ||
         current?.id ||
-        (connecting ? '正在连接…' : '选择模型')}</span
+        (connecting ? '正在准备 Pi…' : '选择模型')}</span
     >
     {#if current}<span class="provider-badge">{current.provider}</span>{/if}
     <span class="chevron" class:open={expanded}
@@ -211,6 +214,7 @@
                   event.preventDefault();
                   event.currentTarget.focus({ preventScroll: true });
                 }}
+                disabled={loading}
                 onclick={() => select(model)}
               >
                 <span class="model-copy"
@@ -233,6 +237,16 @@
                   ? '没有匹配的模型，试试其他名称或服务商。'
                   : '暂无可用模型，请在设置中配置服务商。'}
           </p>{/each}
+        {#if !loading && !error && !models.length && !search.trim() && onconfigure}
+          <button
+            type="button"
+            class="load-more"
+            onclick={() => {
+              close(true);
+              onconfigure?.();
+            }}>配置模型与服务商</button
+          >
+        {/if}
         {#if matches.length > limit}<button
             type="button"
             class="load-more"

@@ -54,6 +54,7 @@ export interface SessionNavigation {
   ensure(): Promise<void>;
   changed(): void;
   refreshModels?(): Promise<void>;
+  retryPreparation?(key: string, thinking: string): Promise<void>;
   stopForArchive(path: string): Promise<void>;
   archived(path: string): void;
 }
@@ -88,6 +89,9 @@ export class Desktop {
   /** 内容与进程生命周期分离；空历史也属于已加载的缓存。 */
   historyCached = $state(false);
   restoring = $state(false);
+  /** 主动新建的预热覆盖元数据和模型应用，不借用历史遮罩阻塞输入。 */
+  preparationRequested = $state(false);
+  preparing = $state(false);
   connectionPhase = $state('');
   private phaseTimer?: ReturnType<typeof setTimeout>;
   private connectionRecovery = false;
@@ -691,7 +695,7 @@ export class Desktop {
     this.newChatModel = carried.key;
     this.newChatThinking = carried.thinking;
   }
-  /** “+”只准备本地草稿，首次发送前不创建或切换 Pi 会话。 */
+  /** 工作区新对话自动准备 Pi；独立适配器仍可只创建本地草稿。 */
   prepareNewChat(project = this.project, preserveDraft = false): void {
     if (this.navigation) {
       this.navigation.draft(project, preserveDraft);
@@ -990,7 +994,8 @@ export class Desktop {
           : defaultSettings.zoom,
       };
       await this.refreshSessions();
-      await this.connect(
+      // 启动恢复固定绑定当前实例，用户在设置读取期间的新建/选目录不经过此导航。
+      await this.connectLocal(
         this.settings.recentProjects.find(
           (path) => !this.sidebarItem('project', path)?.state,
         ) ?? '',
@@ -1522,7 +1527,10 @@ export class Desktop {
   }
   /** 本地草稿借用已有连接的只读目录，不为查看模型启动额外进程。 */
   async refreshModels(): Promise<void> {
-    if (!this.runtimeId && this.navigation?.refreshModels) {
+    if (
+      (!this.runtimeId || this.preparationRequested) &&
+      this.navigation?.refreshModels
+    ) {
       this.modelsLoading = true;
       this.modelsError = '';
       try {
@@ -2009,6 +2017,12 @@ export class Desktop {
   }
   /** 发送接受前保留原草稿，超时绝不自动重发；用户消息由 Pi 权威事件插入。 */
   async send(mode?: 'steer' | 'followUp'): Promise<void> {
+    // 预热把草稿绑定到会话前不能落入 submitDraft，否则会另建实例并重复提交。
+    if (this.preparing && this.navigation) await this.navigation.ensure();
+    if (this.preparationRequested && this.connection === 'failed')
+      throw new Error(this.error || 'Pi 准备失败，请重试连接。');
+    if (this.preparationRequested && this.modelsError)
+      throw new Error(`模型目录尚未加载成功：${this.modelsError}`);
     if (this.messageEdit)
       throw new Error('正在编辑历史消息，请先发送或取消编辑。');
     if (
@@ -2560,6 +2574,15 @@ export class Desktop {
   }
   /** 模型与强度确认后统一保存到工作项目，不修改其他项目。 */
   async setModel(key: string): Promise<void> {
+    if (
+      this.preparationRequested &&
+      this.connection === 'failed' &&
+      this.runtimeId &&
+      this.navigation?.retryPreparation
+    ) {
+      await this.navigation.retryPreparation(key, this.selectedThinking);
+      return;
+    }
     if (this.navigation && this.newChatProject !== null) {
       const model = this.modelByKeyString(key);
       if (!model) throw new Error('所选模型已不可用，请重新选择模型。');
@@ -2591,6 +2614,19 @@ export class Desktop {
   }
   /** 所有强度入口共用此方法，确保项目模型与强度作为一组持久化。 */
   async setThinking(level: string): Promise<void> {
+    if (
+      this.preparationRequested &&
+      this.connection === 'failed' &&
+      this.runtimeId &&
+      this.selectedModel &&
+      this.navigation?.retryPreparation
+    ) {
+      await this.navigation.retryPreparation(
+        `${this.selectedModel.provider}/${this.selectedModel.id}`,
+        level,
+      );
+      return;
+    }
     if (this.navigation && this.newChatProject !== null) {
       if (
         !thinkingLevels.some((value) => value === level) ||

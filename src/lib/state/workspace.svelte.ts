@@ -261,24 +261,40 @@ export class Workspace {
     }
     session.navigation = {
       open: (project, file) => this.open(project, file),
-      draft: (project, preserve) => this.newDraft(project, preserve),
+      draft: (project, preserve) => this.prepareDraft(project, preserve),
       connect: async (project) => {
-        if (this.initializing) {
-          await session.connectLocal(project);
-          return;
-        }
-        this.newDraft(project);
-        await this.ensure(this.active);
+        const draft = this.prepareDraft(project);
+        await this.ensure(draft);
       },
       ensure: () => this.ensure(session),
+      retryPreparation: async (key, thinking) => {
+        // 模型失效后的显式改选替换待应用项，避免重试又覆盖用户的新选择。
+        this.pendingModel.set(session, { key, thinking });
+        await this.ensure(session);
+      },
       refreshModels: async () => {
-        const source = [...this.sessions]
-          .reverse()
-          .find((item) => item.runtimeId && item.connection === 'ready');
+        const source =
+          session.runtimeId && session.connection === 'ready'
+            ? session
+            : [...this.sessions]
+                .reverse()
+                .find((item) => item.runtimeId && item.connection === 'ready');
         if (!source) throw new Error('请等待 Pi 连接完成后重试。');
         await source.refreshMetadata();
         session.models = source.models;
         session.modelsError = source.modelsError;
+        if (source === session && session.preparationRequested) {
+          // 重试目录后还需应用捕获的选择；保持加载状态，搜索可用但不能交错切换模型。
+          session.modelsLoading = true;
+          try {
+            await this.applyPendingModel(session);
+          } catch (error) {
+            session.connection = 'failed';
+            session.error = errorMessage(error);
+          } finally {
+            session.modelsLoading = false;
+          }
+        }
       },
       stopForArchive: (path) => this.stopForArchive(path),
       archived: (path) => this.finishArchive(path),
@@ -291,9 +307,10 @@ export class Workspace {
     return session;
   }
   async init(): Promise<void> {
-    await this.active.init();
+    const initial = this.active;
+    await initial.init();
     this.initializing = false;
-    this.retain(this.active);
+    this.retain(initial);
     try {
       const stored = JSON.parse(
         localStorage.getItem('pi-desktop-workspace-v1') || 'null',
@@ -399,7 +416,7 @@ export class Workspace {
       this.error = errorMessage(error);
     });
   }
-  newDraft(project: string, preserve = false): void {
+  newDraft(project: string, preserve = false, borrowCatalog = true): void {
     const previous = this.active;
     // 在复用草稿或改写快照前捕获来源选择，包括当前草稿自身被再次选中的情况。
     const model = previous.selectedModel;
@@ -417,17 +434,36 @@ export class Workspace {
             );
     let session = this.sessions.find(
       (item) =>
-        item.newChatProject !== null &&
-        this.key(item.newChatProject) === this.key(project) &&
-        !item.runtimeId,
+        this.key(item.newChatProject ?? item.project) === this.key(project) &&
+        ((item.newChatProject !== null && !item.runtimeId) ||
+          item.preparing ||
+          (item.preparationRequested &&
+            !item.lastSentAt &&
+            item.run === 'idle' &&
+            !item.task)),
     );
+    if (
+      session &&
+      (session.preparing || (session.preparationRequested && session.runtimeId))
+    ) {
+      // 未发送的预热会话仍是原草稿；重新打开不创建第二个实例或丢失输入。
+      if (preserve && session !== previous) {
+        session.draft = previous.draft;
+        session.draftParts = previous.draftParts;
+        session.attachments = previous.attachments;
+        previous.draft = '';
+        previous.attachments = [];
+      }
+      this.select(session);
+      return;
+    }
     session ??= this.create();
     session.project = project;
     session.newChatProject = project;
     session.models = previous.models;
     session.modelsError = previous.modelsError;
     // 启动目录尚在读取时创建的草稿也接收最终结果，不停留在空数组副本。
-    if (previous.modelsLoading) void session.refreshModels();
+    if (previous.modelsLoading && borrowCatalog) void session.refreshModels();
     session.levels = previous.levels;
     session.snapshot = { model, thinkingLevel: thinking };
     session.initializeDraftModel(model, thinking);
@@ -442,9 +478,56 @@ export class Workspace {
     }
     this.select(session);
   }
+  /** 用户主动新建才预热；恢复与内部草稿管理仍可只创建本地对象。 */
+  prepareDraft(project: string, preserve = false): Desktop {
+    // 自动准备以目标实例为准，不再并行借用来源目录覆盖目标项目的最终结果。
+    this.newDraft(project, preserve, false);
+    const session = this.active;
+    if (project) {
+      if (!session.preparing && session.newChatProject !== null) {
+        const preference = session.settings.projectModels?.find(
+          (item) => this.key(item.project) === this.key(project),
+        );
+        if (preference)
+          session.initializeDraftModel(
+            session.models.find(
+              (model) =>
+                model.provider === preference.provider &&
+                model.id === preference.model,
+            ) ?? {
+              provider: preference.provider,
+              id: preference.model,
+              name: preference.model,
+            },
+            preference.thinkingLevel,
+          );
+        else if (
+          session.selectedModel &&
+          !session.models.some(
+            (model) =>
+              model.provider === session.selectedModel?.provider &&
+              model.id === session.selectedModel?.id,
+          )
+        ) {
+          // 来源模型已失效或目录尚未就绪时，交给目标 Pi 默认值，避免沿用无效键。
+          session.initializeDraftModel(undefined, 'off');
+          session.snapshot = {};
+        }
+      }
+      session.preparationRequested = true;
+      void this.ensure(session).catch(() => {
+        // ensure 已把错误保存在所属会话；后台完成不抢当前视图或重复通知。
+      });
+    }
+    return session;
+  }
   ensure(session: Desktop): Promise<void> {
     const pending = this.ensuring.get(session);
     if (pending) return pending;
+    session.preparing =
+      session.preparationRequested &&
+      (session.connection !== 'ready' || this.pendingModel.has(session));
+    session.error = '';
     session.restoring = true;
     const task = this.ensureLocal(session)
       .catch((error) => {
@@ -454,6 +537,7 @@ export class Workspace {
       })
       .finally(() => {
         this.ensuring.delete(session);
+        session.preparing = false;
         session.finishRestore();
       });
     this.ensuring.set(session, task);
@@ -499,7 +583,7 @@ export class Workspace {
         key: `${model.provider}/${model.id}`,
         thinking,
       });
-    if (!session.historyCached)
+    if (!session.historyCached && !session.preparing)
       session.openingSession = {
         path: '',
         title: session.snapshot.sessionFile ? session.sessionTitle : '新对话',
@@ -515,7 +599,21 @@ export class Workspace {
   }
   private async applyPendingModel(session: Desktop): Promise<void> {
     const selection = this.pendingModel.get(session);
-    if (!selection) return;
+    if (!selection || session.modelsError) return;
+    if (
+      `${session.snapshot.model?.provider}/${session.snapshot.model?.id}` ===
+        selection.key &&
+      (session.snapshot.thinkingLevel ?? 'off') === selection.thinking
+    ) {
+      this.pendingModel.delete(session);
+      return;
+    }
+    if (
+      !session.models.some(
+        (model) => `${model.provider}/${model.id}` === selection.key,
+      )
+    )
+      throw new Error('所选模型已不可用，请重新选择模型。');
     await session.setModel(selection.key);
     await session.setThinking(selection.thinking);
     this.pendingModel.delete(session);
